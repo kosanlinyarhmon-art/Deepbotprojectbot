@@ -4,7 +4,6 @@ import threading
 import json
 import logging
 import sys
-from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -35,7 +34,7 @@ INVITE_LINK = os.environ.get("INVITE_LINK")
 OTHER_CHANNELS = os.environ.get("OTHER_CHANNELS", "").split(",") if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(os.environ.get("ADMIN_ID", "0"))]
 
-# သင်၏ Video File IDs များကို ဤနေရာတွင် ထည့်ပါ
+# သင်၏ Video File IDs များ (အစစ်ထည့်ရန်)
 MOVIE_FILE_IDS = [
     "FILE_ID_1",
     "FILE_ID_2",
@@ -66,7 +65,6 @@ def is_admin(user_id: int) -> bool:
 
 maintenance_mode = False
 
-# ---------- User Callback ----------
 async def movie_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global maintenance_mode
     query = update.callback_query
@@ -164,7 +162,6 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     maintenance_mode = False
     await update.message.reply_text("🔊 Maintenance mode ပိတ်ပါပြီ။")
 
-# ကျန်သည့် admin command အလွတ်များ
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     await update.message.reply_text("⏳ /schedule - demo")
@@ -188,12 +185,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_bot():
     while True:
         try:
-            application = (
-                Application.builder()
-                .token(TOKEN)
-                .build()
-            )
-            # Handlers အားလုံးထည့်ပါ
+            application = Application.builder().token(TOKEN).build()
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CallbackQueryHandler(movie_callback, pattern="get_movie"))
             application.add_handler(CommandHandler("schedule", schedule))
@@ -206,7 +198,6 @@ def run_bot():
             application.add_handler(CommandHandler("cancel", cancel))
             application.add_handler(CommandHandler("mute", mute))
             application.add_handler(CommandHandler("unmute", unmute))
-            
             logger.info("Starting bot polling...")
             application.run_polling()
         except Exception as e:
@@ -216,11 +207,14 @@ def run_bot():
 
 # ---------- Main Entry Point ----------
 if __name__ == "__main__":
-    # Bot ကို background thread ထဲ စတင်မည်
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Flask ကို background thread မှာ run မယ် (ဒါက port binding အတွက်ပဲ)
+    def run_flask():
+        port = int(os.environ.get("PORT", 5000))
+        logger.info(f"Starting Flask server on port {port}")
+        app.run(host="0.0.0.0", port=port)
     
-    # Flask server ကို main thread ထဲ တိုက်ရိုက် run မည် (Render သိရန်)
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Starting Flask server on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Bot ကို main thread မှာ run မယ် (asyncio signal handler အတွက် အရေးကြီး)
+    run_bot()
