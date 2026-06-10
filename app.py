@@ -2,8 +2,8 @@ import os
 import asyncio
 import threading
 import json
-import logging      # ← ဒီစာကြောင်း ထည့်ဖို့ အရေးကြီးဆုံးပါ။
-import sys          # ← sys.stdout အတွက် ထည့်ပေးရန်
+import logging
+import sys
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -66,6 +66,7 @@ def is_admin(user_id: int) -> bool:
 
 maintenance_mode = False
 
+# ---------- User Callback ----------
 async def movie_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global maintenance_mode
     query = update.callback_query
@@ -163,7 +164,7 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     maintenance_mode = False
     await update.message.reply_text("🔊 Maintenance mode ပိတ်ပါပြီ။")
 
-# ကျန်သည့် admin command အလွတ်များ (နောက်မှ ထပ်ဖြည့်နိုင်)
+# ကျန်သည့် admin command အလွတ်များ
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     await update.message.reply_text("⏳ /schedule - demo")
