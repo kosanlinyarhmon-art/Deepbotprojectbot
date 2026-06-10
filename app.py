@@ -7,7 +7,7 @@ import sys
 import secrets
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.helpers import create_deep_linked_url
 
 # ---------- Logging ----------
@@ -34,8 +34,8 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
-OTHER_CHANNELS = [link for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link] if os.environ.get("OTHER_CHANNELS") else []
-ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_ID", "").split(",") if id] if os.environ.get("ADMIN_ID") else []
+OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
+ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
 DB_FILE = "bot_data.json"
 
@@ -67,11 +67,15 @@ def generate_payload():
 # ---------- Start & Deep Link Handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    # Check if it's a deep link (has payload)
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         data = load_data()
         file_id = data["file_store"].get(payload)
+        
         if file_id:
+            # Member check
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 [Channel သို့ဝင်ရန်]({INVITE_LINK})",
@@ -79,14 +83,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=True
                 )
                 return
+            
+            # Send video directly
             try:
                 await update.message.reply_text("🎬 ဇာတ်ကား ပို့ပေးနေပါပြီ...⏳")
                 video_msg = await context.bot.send_video(chat_id=user_id, video=file_id, caption="🎬 သင့်ဇာတ်ကား")
+                
+                # Warning message
                 warn_msg = await context.bot.send_message(
                     chat_id=user_id,
                     text="⚠️ **သတိပေးချက်**\n\nဤဇာတ်ကားကို **၅ မိနစ်** အတွင်း ဖျက်ပါမည်။\nကျေးဇူးပြု၍ **Forward** လုပ်ပြီး သိမ်းထားပါ။",
                     parse_mode="Markdown"
                 )
+                
+                # Auto delete after 5 minutes
                 async def delete_after():
                     await asyncio.sleep(300)
                     try:
@@ -95,27 +105,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                 asyncio.create_task(delete_after())
+                
+                # Update stats
                 if user_id not in data["users"]:
                     data["users"].append(user_id)
                 data["total_requests"] += 1
                 save_data(data)
+                
+                # Invite other channels with buttons
                 if OTHER_CHANNELS:
                     keyboard = []
                     if len(OTHER_CHANNELS) >= 1:
                         keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=OTHER_CHANNELS[0])])
                     if len(OTHER_CHANNELS) >= 2:
                         keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=OTHER_CHANNELS[1])])
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text="🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
-                        reply_markup=reply_markup
-                    )
+                    if keyboard:
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text="🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
+                            reply_markup=reply_markup
+                        )
             except Exception as e:
                 await context.bot.send_message(chat_id=user_id, text=f"❌ Video ပို့ရာတွင် အမှား: {str(e)}")
         else:
             await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
     else:
+        # Normal start command
         if is_admin(user_id):
             await update.message.reply_text(
                 "🎬 မင်္ဂလာပါ Admin။\n\n"
@@ -130,37 +146,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(
                 "🎬 မင်္ဂလာပါ။\n"
-                "ဤ Bot သည် Admin မှ Channel အတွက် Post များဖန်တီးရန် သုံးပါသည်။\n"
-                "အကူအညီလိုပါက Admin ကို ဆက်သွယ်ပါ။"
+                "ဤ Bot သည် Channel အတွက် ဇာတ်ကားများ ဖြန့်ဝေရန် သုံးပါသည်။\n"
+                "ဇာတ်ကားရယူရန် Channel ရှိ Post အောက်က ခလုတ်ကို နှိပ်ပါ။"
             )
 
-# ---------- /link Command (Admin only: generate deep link for any video) ----------
+# ---------- /link Command (Admin: send video, get deep link) ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။ ထို Video အတွက် Deep Link ထုတ်ပေးပါမည်။")
-    context.user_data['waiting_for_video_for_link'] = True
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။ သင့်အတွက် Deep Link ထုတ်ပေးပါမည်။")
+    context.user_data['waiting_for_video_link'] = True
 
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if context.user_data.get('waiting_for_video_for_link'):
+    
+    if context.user_data.get('waiting_for_video_link'):
         video = update.message.video
         if video:
-            payload = generate_payload()
-            data = load_data()
-            data["file_store"][payload] = video.file_id
-            save_data(data)
-            deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-            await update.message.reply_text(
-                f"🔗 **သင်၏ Deep Link (Video မျှဝေရန်)**\n\n"
-                f"`{deep_link}`\n\n"
-                f"ဤလင့်ကို ကူးယူ၍ အခြားသူများကို ပေးပို့နိုင်ပါသည်။\n"
-                f"လင့်ကိုနှိပ်သူတိုင်း (Channel Member ဖြစ်မှ) Video ကို ရရှိပါလိမ့်မည်။",
-                parse_mode="Markdown"
-            )
-            context.user_data.pop('waiting_for_video_for_link', None)
+            try:
+                # Generate unique payload and store file
+                payload = generate_payload()
+                data = load_data()
+                data["file_store"][payload] = video.file_id
+                save_data(data)
+                
+                # Create deep link
+                deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+                
+                await update.message.reply_text(
+                    f"🔗 **သင်၏ Deep Link**\n\n"
+                    f"`{deep_link}`\n\n"
+                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ဗီဒီယိုကို ချက်ချင်း ရရှိမည်ဖြစ်သည်။\n"
+                    f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
+            context.user_data.pop('waiting_for_video_link', None)
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
@@ -184,23 +208,27 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption'] = update.message.text
-    await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ... (ဤ Video အတွက် Deep Link ထုတ်ပေးပါမည်)")
+    await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
 
 async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.video:
         await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
         return VIDEO_FILE
+    
     video = update.message.video
     payload = generate_payload()
     data = load_data()
     data["file_store"][payload] = video.file_id
     save_data(data)
+    
     deep_link = create_deep_linked_url(BOT_USERNAME, payload)
     button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
     reply_markup = InlineKeyboardMarkup([[button]])
+    
     poster = context.user_data['poster']
     caption_text = context.user_data['caption']
+    
     await update.message.reply_photo(
         photo=poster,
         caption=caption_text,
@@ -218,10 +246,11 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Other Admin Commands ----------
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     message = " ".join(context.args)
     if not message:
-        await update.message.reply_text("📢 /broadcast <message>")
+        await update.message.reply_text("📢 /broadcast <message> - ပြန်လွှင့်ရန် စာသားထည့်ပါ။")
         return
     data = load_data()
     count = 0
@@ -234,36 +263,48 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📢 ပြန်လွှင့်ခြင်း ပြီးဆုံးပါပြီ။ လက်ခံသူ {count} ဦး။")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     data = load_data()
     await update.message.reply_text(f"📊 **စာရင်းအင်း**\n\n👥 အသုံးပြုသူဦးရေ: {len(data['users'])}\n🎬 တောင်းဆိုမှုအရေအတွက်: {data['total_requests']}")
 
 async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global maintenance_mode
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     maintenance_mode = True
     await update.message.reply_text("🔇 Maintenance mode **ဖွင့်** ထားပါသည်။")
 
 async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global maintenance_mode
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     maintenance_mode = False
     await update.message.reply_text("🔊 Maintenance mode **ပိတ်** ထားပါသည်။")
 
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     await update.message.reply_text("⏳ အချိန်ဇယား (လုပ်ဆောင်ဆဲ)")
+
 async def listschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     await update.message.reply_text("📋 အချိန်ဇယားစာရင်း (လုပ်ဆောင်ဆဲ)")
+
 async def cancelschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     await update.message.reply_text("❌ အချိန်ဇယားဖျက်ရန် (လုပ်ဆောင်ဆဲ)")
+
 async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     await update.message.reply_text("🗑️ ဖိုင်ဖျက်ရန် (လုပ်ဆောင်ဆဲ)")
+
 async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     await update.message.reply_text("⚠️ အားလုံးဖျက်ရန် (လုပ်ဆောင်ဆဲ)")
 
 # ---------- Application ----------
@@ -280,6 +321,7 @@ conv_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
 
+# Add handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(conv_handler)
 application.add_handler(CommandHandler("link", link_command))
