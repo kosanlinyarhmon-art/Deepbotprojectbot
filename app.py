@@ -53,7 +53,8 @@ async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception as e:
+        logger.error(f"Member check failed: {e}")
         return False
 
 def is_admin(user_id: int) -> bool:
@@ -88,11 +89,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Handle Deep Link (from channel post button) ----------
 async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    # If there is a payload
     if context.args and len(context.args) > 0:
         payload = context.args[0]
+        logger.info(f"Deep link clicked by {user_id} with payload: {payload}")
         data = load_data()
         file_id = data["file_store"].get(payload)
         if file_id:
+            # Check membership
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 [Channel သို့ဝင်ရန်]({INVITE_LINK})",
@@ -100,66 +104,76 @@ async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=True
                 )
                 return
-            file_obj = await context.bot.get_file(file_id)
-            file_path = file_obj.file_path
-            download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-            await update.message.reply_text(
-                f"🎬 **သင့်ဇာတ်ကား Download Link**\n\n"
-                f"🔗 [Click Here to Download]({download_link})\n\n"
-                f"⚠️ ဒီ Link သည် **၅ မိနစ်** အတွင်း သက်တမ်းကုန်မည်။ ချက်ချင်း Download လုပ်ပါ။",
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-            if user_id not in data["users"]:
-                data["users"].append(user_id)
-            data["total_requests"] += 1
-            save_data(data)
-            # Invite other channels with buttons
-            if OTHER_CHANNELS:
-                keyboard = []
-                if len(OTHER_CHANNELS) >= 1:
-                    keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=OTHER_CHANNELS[0])])
-                if len(OTHER_CHANNELS) >= 2:
-                    keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=OTHER_CHANNELS[1])])
-                reply_markup = InlineKeyboardMarkup(keyboard)
+            # Send download link
+            try:
+                file_obj = await context.bot.get_file(file_id)
+                file_path = file_obj.file_path
+                download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
                 await update.message.reply_text(
-                    "🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
-                    reply_markup=reply_markup
+                    f"🎬 **သင့်ဇာတ်ကား Download Link**\n\n"
+                    f"🔗 [Click Here to Download]({download_link})\n\n"
+                    f"⚠️ ဒီ Link သည် **၅ မိနစ်** အတွင်း သက်တမ်းကုန်မည်။ ချက်ချင်း Download လုပ်ပါ။",
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
                 )
+                # Update stats
+                if user_id not in data["users"]:
+                    data["users"].append(user_id)
+                data["total_requests"] += 1
+                save_data(data)
+                # Invite other channels with buttons
+                if OTHER_CHANNELS:
+                    keyboard = []
+                    if len(OTHER_CHANNELS) >= 1:
+                        keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=OTHER_CHANNELS[0])])
+                    if len(OTHER_CHANNELS) >= 2:
+                        keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=OTHER_CHANNELS[1])])
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await update.message.reply_text(
+                        "🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
+                        reply_markup=reply_markup
+                    )
+            except Exception as e:
+                logger.error(f"Error sending download link: {e}")
+                await update.message.reply_text(f"❌ Download link ထုတ်ရာတွင် အမှားရှိသည်။ ကျေးဇူးပြု၍ နောက်မှထပ်စမ်းပါ။\nError: {str(e)}")
         else:
+            logger.warning(f"Invalid payload: {payload}")
             await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
     else:
+        # Normal /start without payload
         await start(update, context)
 
-# ---------- /link Command ----------
+# ---------- /link Command: Admin sends video, bot replies with download link ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    context.user_data['expecting_video_for_link'] = True
-    await update.message.reply_text("📤 ကျေးဇူးပြု၍ Video file တစ်ခု ပို့ပေးပါ။")
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
+    context.user_data['waiting_for_video'] = True
 
-async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video messages for /link command (admin only)"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         return
-    if context.user_data.get('expecting_video_for_link'):
+    if context.user_data.get('waiting_for_video'):
         video = update.message.video
         if video:
-            file_id = video.file_id
-            file_obj = await context.bot.get_file(file_id)
-            file_path = file_obj.file_path
-            download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-            await update.message.reply_text(
-                f"🔗 **သင်၏ Download Link**\n\n`{download_link}`\n\nဤလင့်ကို ကူးယူ၍ အသုံးပြုနိုင်ပါသည်။",
-                parse_mode="Markdown"
-            )
-            context.user_data.pop('expecting_video_for_link', None)
+            try:
+                file_id = video.file_id
+                file_obj = await context.bot.get_file(file_id)
+                file_path = file_obj.file_path
+                download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+                await update.message.reply_text(
+                    f"🔗 **သင်၏ Download Link**\n\n`{download_link}`\n\nဤလင့်ကို ကူးယူ၍ အသုံးပြုနိုင်ပါသည်။",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Link ထုတ်ရာတွင် အမှား: {e}")
+            finally:
+                context.user_data.pop('waiting_for_video', None)
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /network Command ----------
+# ---------- /network Command (formerly /newpost) ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def network_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,10 +290,10 @@ conv_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
 
-application.add_handler(CommandHandler("start", deep_link_handler))
+application.add_handler(CommandHandler("start", deep_link_handler))  # Handles both deep link and normal start
 application.add_handler(conv_handler)
 application.add_handler(CommandHandler("link", link_command))
-application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, handle_video_message))
+application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
 application.add_handler(CommandHandler("broadcast", broadcast))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("mute", mute))
