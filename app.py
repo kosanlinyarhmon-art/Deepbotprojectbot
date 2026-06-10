@@ -71,10 +71,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🎬 မင်္ဂလာပါ Admin။\n\n"
             "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n"
-            "/newpost - Channel Post အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
+            "/network - Channel Post အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
             "/link - Video ပို့ပါက Download Link ထုတ်ပေးမည်\n"
             "/stats - စာရင်းအင်းကြည့်ရန်\n"
-            "/broadcast - အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
+            "/broadcast <message> - အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
             "/mute - Maintenance mode ဖွင့်ရန်\n"
             "/unmute - Maintenance mode ပိတ်ရန်"
         )
@@ -85,7 +85,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "အကူအညီလိုပါက Admin ကို ဆက်သွယ်ပါ။"
         )
 
-# ---------- Handle Deep Link (when user clicks button from channel post) ----------
+# ---------- Handle Deep Link (from channel post button) ----------
 async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if context.args and len(context.args) > 0:
@@ -93,7 +93,6 @@ async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_data()
         file_id = data["file_store"].get(payload)
         if file_id:
-            # Check membership
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 [Channel သို့ဝင်ရန်]({INVITE_LINK})",
@@ -101,7 +100,6 @@ async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=True
                 )
                 return
-            # Send download link
             file_obj = await context.bot.get_file(file_id)
             file_path = file_obj.file_path
             download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
@@ -112,7 +110,6 @@ async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
-            # Update stats
             if user_id not in data["users"]:
                 data["users"].append(user_id)
             data["total_requests"] += 1
@@ -159,14 +156,11 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data.pop('waiting_for_video', None)
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
-    else:
-        # Normal video from admin not in /link flow? ignore
-        pass
 
-# ---------- /newpost Conversation ----------
+# ---------- /network Command (formerly /newpost) ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
-async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def network_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
@@ -217,10 +211,11 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Admin Commands ----------
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id):
+        return
     message = " ".join(context.args)
     if not message:
-        await update.message.reply_text("📢 /broadcast <message>")
+        await update.message.reply_text("📢 /broadcast <message> - ပြန်လွှင့်ရန် စာသားထည့်ပါ။")
         return
     data = load_data()
     count = 0
@@ -268,9 +263,9 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# Conversation for /newpost
+# Conversation for /network
 conv_handler = ConversationHandler(
-    entry_points=[CommandHandler('newpost', newpost_start)],
+    entry_points=[CommandHandler('network', network_start)],
     states={
         POSTER: [MessageHandler(filters.PHOTO, receive_poster)],
         CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption)],
@@ -279,11 +274,10 @@ conv_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("newpost", conv_handler))
+application.add_handler(CommandHandler("start", deep_link_handler))  # handles deep link and normal start
+application.add_handler(conv_handler)  # /network command
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
-application.add_handler(CommandHandler("start", deep_link_handler))
 application.add_handler(CommandHandler("broadcast", broadcast))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("mute", mute))
