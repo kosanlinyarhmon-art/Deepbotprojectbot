@@ -131,18 +131,20 @@ async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await start(update, context)
 
-# ---------- /link Command: Admin sends video, bot replies with download link ----------
+# ---------- /link Command ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
-    context.user_data['waiting_for_video'] = True
+    context.user_data['expecting_video_for_link'] = True
+    await update.message.reply_text("📤 ကျေးဇူးပြု၍ Video file တစ်ခု ပို့ပေးပါ။")
 
-async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle video messages for /link command (admin only)"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
         return
-    if context.user_data.get('waiting_for_video'):
+    if context.user_data.get('expecting_video_for_link'):
         video = update.message.video
         if video:
             file_id = video.file_id
@@ -153,11 +155,11 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 f"🔗 **သင်၏ Download Link**\n\n`{download_link}`\n\nဤလင့်ကို ကူးယူ၍ အသုံးပြုနိုင်ပါသည်။",
                 parse_mode="Markdown"
             )
-            context.user_data.pop('waiting_for_video', None)
+            context.user_data.pop('expecting_video_for_link', None)
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /network Command (formerly /newpost) ----------
+# ---------- /network Command ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def network_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,10 +276,10 @@ conv_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
 
-application.add_handler(CommandHandler("start", deep_link_handler))  # handles deep link and normal start
-application.add_handler(conv_handler)  # /network command
+application.add_handler(CommandHandler("start", deep_link_handler))
+application.add_handler(conv_handler)
 application.add_handler(CommandHandler("link", link_command))
-application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
+application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, handle_video_message))
 application.add_handler(CommandHandler("broadcast", broadcast))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("mute", mute))
