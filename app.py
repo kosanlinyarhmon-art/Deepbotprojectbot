@@ -101,48 +101,45 @@ async def deep_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=True
                 )
                 return
-            # Get download link (no send_video)
-            try:
-                file_obj = await context.bot.get_file(file_id)
-                file_path = file_obj.file_path
-                download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+            # Send File ID (no get_file, no send_video)
+            await update.message.reply_text(
+                f"🎬 **သင့်ဇာတ်ကား File ID**\n\n"
+                f"`{file_id}`\n\n"
+                f"📌 **သုံးစွဲနည်း**\n"
+                f"1. ဒီ File ID ကို **ကူးယူ** ပါ။\n"
+                f"2. သင်၏ Telegram Chat (ဥပမာ - Saved Messages) တွင် **Forward** လုပ်ပါ။\n"
+                f"3. Forward လုပ်ပြီးပါက ဇာတ်ကားကို သင်၏ Chat တွင် တိုက်ရိုက်ကြည့်ရှုနိုင်ပါသည်။\n\n"
+                f"⚠️ သတိပေးချက် - ဤ File ID သည် **အကန့်အသတ်မရှိ** ရှိပါသည်။ သိမ်းဆည်းထားနိုင်ပါသည်။",
+                parse_mode="Markdown"
+            )
+            # Update stats
+            if user_id not in data["users"]:
+                data["users"].append(user_id)
+            data["total_requests"] += 1
+            save_data(data)
+            # Invite other channels
+            if OTHER_CHANNELS:
+                keyboard = []
+                if len(OTHER_CHANNELS) >= 1:
+                    keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=OTHER_CHANNELS[0])])
+                if len(OTHER_CHANNELS) >= 2:
+                    keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=OTHER_CHANNELS[1])])
+                reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(
-                    f"🎬 **သင့်ဇာတ်ကား Download Link**\n\n"
-                    f"🔗 [Click Here to Download]({download_link})\n\n"
-                    f"⚠️ ဒီ Link သည် စက္ကန့်ပိုင်းအတွင်း သက်တမ်းကုန်နိုင်သည်။ ချက်ချင်း Download လုပ်ပါ။",
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
+                    "🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
+                    reply_markup=reply_markup
                 )
-                # Update stats
-                if user_id not in data["users"]:
-                    data["users"].append(user_id)
-                data["total_requests"] += 1
-                save_data(data)
-                # Invite other channels
-                if OTHER_CHANNELS:
-                    keyboard = []
-                    if len(OTHER_CHANNELS) >= 1:
-                        keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=OTHER_CHANNELS[0])])
-                    if len(OTHER_CHANNELS) >= 2:
-                        keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=OTHER_CHANNELS[1])])
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await update.message.reply_text(
-                        "🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
-                        reply_markup=reply_markup
-                    )
-            except Exception as e:
-                await update.message.reply_text(f"❌ Download Link ထုတ်ရာတွင် အမှား: {str(e)}")
         else:
             await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
     else:
         await start(update, context)
 
-# ---------- /link Command ----------
+# ---------- /link Command (Admin: send video, get file_id) ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။ ပို့ပြီးပါက File ID ကို ရရှိပါမည်။")
     context.user_data['waiting_for_video'] = True
 
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,21 +148,18 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
     if context.user_data.get('waiting_for_video'):
         video = update.message.video
         if video:
-            try:
-                file_obj = await context.bot.get_file(video.file_id)
-                file_path = file_obj.file_path
-                download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-                await update.message.reply_text(
-                    f"🔗 **သင်၏ Download Link**\n\n`{download_link}`\n\nဤလင့်ကို ကူးယူ၍ အသုံးပြုနိုင်ပါသည်။",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await update.message.reply_text(f"❌ Link ထုတ်ရာတွင် အမှား: {str(e)}")
+            file_id = video.file_id
+            await update.message.reply_text(
+                f"🔗 **သင်၏ Video File ID**\n\n"
+                f"`{file_id}`\n\n"
+                f"ဤ File ID ကို ကူးယူ၍ `/network` command တွင် သုံးနိုင်ပါသည်။",
+                parse_mode="Markdown"
+            )
             context.user_data.pop('waiting_for_video', None)
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /network Command ----------
+# ---------- /network Command (create post) ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def network_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,7 +179,7 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption'] = update.message.text
-    await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ... (ဒီ Video အတွက် Download Link ထုတ်ပေးပါမည်)")
+    await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ... (ဤ Video အတွက် File ID ကို သိမ်းဆည်းပါမည်)")
     return VIDEO_FILE
 
 async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
