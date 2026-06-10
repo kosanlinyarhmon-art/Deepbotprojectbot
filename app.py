@@ -10,12 +10,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ---------- Flask Server (Render အတွက်) ----------
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Movie Bot is running!"
-
-@app.route('/health')
-def health():
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
     return "OK", 200
 
 # ---------- Configuration ----------
