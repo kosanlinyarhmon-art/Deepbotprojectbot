@@ -67,13 +67,11 @@ def generate_payload():
 # ---------- Start & Deep Link Handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # Check if it's a deep link (has payload)
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         data = load_data()
         file_id = data["file_store"].get(payload)
         if file_id:
-            # Member check
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 [Channel သို့ဝင်ရန်]({INVITE_LINK})",
@@ -81,17 +79,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=True
                 )
                 return
-            # Send video directly
             try:
                 await update.message.reply_text("🎬 ဇာတ်ကား ပို့ပေးနေပါပြီ...⏳")
                 video_msg = await context.bot.send_video(chat_id=user_id, video=file_id, caption="🎬 သင့်ဇာတ်ကား")
-                # Warning message
                 warn_msg = await context.bot.send_message(
                     chat_id=user_id,
                     text="⚠️ **သတိပေးချက်**\n\nဤဇာတ်ကားကို **၅ မိနစ်** အတွင်း ဖျက်ပါမည်။\nကျေးဇူးပြု၍ **Forward** လုပ်ပြီး သိမ်းထားပါ။",
                     parse_mode="Markdown"
                 )
-                # Auto delete after 5 minutes
                 async def delete_after():
                     await asyncio.sleep(300)
                     try:
@@ -100,12 +95,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                 asyncio.create_task(delete_after())
-                # Update stats
                 if user_id not in data["users"]:
                     data["users"].append(user_id)
                 data["total_requests"] += 1
                 save_data(data)
-                # Invite other channels
                 if OTHER_CHANNELS:
                     keyboard = []
                     if len(OTHER_CHANNELS) >= 1:
@@ -123,13 +116,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
     else:
-        # Normal start command
         if is_admin(user_id):
             await update.message.reply_text(
                 "🎬 မင်္ဂလာပါ Admin။\n\n"
                 "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n"
                 "/network - Channel Post အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
-                "/link - Video ပို့ပါက Download Link ထုတ်ပေးမည်\n"
+                "/link - Video ပို့ပါက Deep Link ထုတ်ပေးမည်\n"
                 "/stats - စာရင်းအင်းကြည့်ရန်\n"
                 "/broadcast <message> - အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
                 "/mute - Maintenance mode ဖွင့်ရန်\n"
@@ -142,31 +134,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "အကူအညီလိုပါက Admin ကို ဆက်သွယ်ပါ။"
             )
 
-# ---------- /link Command (Admin only: get download link) ----------
+# ---------- /link Command (Admin only: generate deep link for any video) ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
-    context.user_data['waiting_for_video'] = True
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။ ထို Video အတွက် Deep Link ထုတ်ပေးပါမည်။")
+    context.user_data['waiting_for_video_for_link'] = True
 
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if context.user_data.get('waiting_for_video'):
+    if context.user_data.get('waiting_for_video_for_link'):
         video = update.message.video
         if video:
-            try:
-                file_obj = await context.bot.get_file(video.file_id)
-                file_path = file_obj.file_path
-                download_link = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-                await update.message.reply_text(
-                    f"🔗 **သင်၏ Download Link**\n\n`{download_link}`\n\nဤလင့်ကို ကူးယူ၍ အသုံးပြုနိုင်ပါသည်။",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await update.message.reply_text(f"❌ Link ထုတ်ရာတွင် အမှား: {str(e)}")
-            context.user_data.pop('waiting_for_video', None)
+            payload = generate_payload()
+            data = load_data()
+            data["file_store"][payload] = video.file_id
+            save_data(data)
+            deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+            await update.message.reply_text(
+                f"🔗 **သင်၏ Deep Link (Video မျှဝေရန်)**\n\n"
+                f"`{deep_link}`\n\n"
+                f"ဤလင့်ကို ကူးယူ၍ အခြားသူများကို ပေးပို့နိုင်ပါသည်။\n"
+                f"လင့်ကိုနှိပ်သူတိုင်း (Channel Member ဖြစ်မှ) Video ကို ရရှိပါလိမ့်မည်။",
+                parse_mode="Markdown"
+            )
+            context.user_data.pop('waiting_for_video_for_link', None)
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
@@ -286,7 +280,7 @@ conv_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
 
-application.add_handler(CommandHandler("start", start))  # handles deep link and normal start
+application.add_handler(CommandHandler("start", start))
 application.add_handler(conv_handler)
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
