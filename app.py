@@ -188,7 +188,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_bot():
     while True:
         try:
-            application = Application.builder().token(TOKEN).build()
+            application = (
+                Application.builder()
+                .token(TOKEN)
+                .build()
+            )
+            # Handlers အားလုံးထည့်ပါ
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CallbackQueryHandler(movie_callback, pattern="get_movie"))
             application.add_handler(CommandHandler("schedule", schedule))
@@ -201,6 +206,7 @@ def run_bot():
             application.add_handler(CommandHandler("cancel", cancel))
             application.add_handler(CommandHandler("mute", mute))
             application.add_handler(CommandHandler("unmute", unmute))
+            
             logger.info("Starting bot polling...")
             application.run_polling()
         except Exception as e:
