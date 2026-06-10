@@ -202,26 +202,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Main ----------
 def run_bot():
-    application = Application.builder().token(TOKEN).build()
-    # User
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(movie_callback, pattern="get_movie"))
-    # Admin
-    application.add_handler(CommandHandler("schedule", schedule))
-    application.add_handler(CommandHandler("listschedule", listschedule))
-    application.add_handler(CommandHandler("cancelschedule", cancelschedule))
-    application.add_handler(CommandHandler("broadcast", broadcast))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("delete", delete_file))
-    application.add_handler(CommandHandler("deleteall", deleteall))
-    application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CommandHandler("mute", mute))
-    application.add_handler(CommandHandler("unmute", unmute))
-    
-    application.run_polling()
+    """Bot ကို အလိုအလျောက် ပြန်စမြဲ ဖြစ်အောင် Loop ပတ်ထားတဲ့ function"""
+    while True:
+        try:
+            # Bot application အသစ် တည်ဆောက်ပါ
+            application = Application.builder().token(TOKEN).build()
+            
+            # Handlers အားလုံးကို ထပ်ထည့်ပါ
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CallbackQueryHandler(movie_callback, pattern="get_movie"))
+            application.add_handler(CommandHandler("schedule", schedule))
+            application.add_handler(CommandHandler("listschedule", listschedule))
+            application.add_handler(CommandHandler("cancelschedule", cancelschedule))
+            application.add_handler(CommandHandler("broadcast", broadcast))
+            application.add_handler(CommandHandler("stats", stats))
+            application.add_handler(CommandHandler("delete", delete_file))
+            application.add_handler(CommandHandler("deleteall", deleteall))
+            application.add_handler(CommandHandler("cancel", cancel))
+            application.add_handler(CommandHandler("mute", mute))
+            application.add_handler(CommandHandler("unmute", unmute))
 
-if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+            # Polling စတင်ပါ (ဒီနေရာမှာ ရပ်သွားရင် loop က exception ဖမ်းပြီး ပြန်စမယ်)
+            application.run_polling()
+            
+        except Exception as e:
+            print(f"❌ Bot polling crashed: {e}. Restarting in 10 seconds...")
+            import time
+            time.sleep(10)
+            # loop က အလိုအလျောက် ပြန်စမယ်
