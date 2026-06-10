@@ -7,6 +7,22 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+if __name__ == "__main__":
+    try:
+        logger.info("Starting Flask app...")
+        port = int(os.environ.get("PORT", 5000))
+        logger.info(f"Binding to port: {port}")
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        logger.exception(f"Fatal error: {e}")
+        sys.exit(1)
 # ---------- Flask Server (Render အတွက်) ----------
 app = Flask(__name__)
 
