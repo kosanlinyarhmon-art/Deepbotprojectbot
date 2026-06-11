@@ -198,11 +198,10 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
     context.user_data['waiting_for_video_link'] = True
 
-# ✅ FIXED: parse_mode လုံးဝမပါအောင် ပြင်ထားပါ
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    
+
     if context.user_data.get('waiting_for_video_link'):
         video = update.message.video
         if video:
@@ -211,8 +210,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 file_name = video.file_name or "ဇာတ်ကား"
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-                
-                # parse_mode ကို လုံးဝ မသုံးပါနဲ့ (default None)
+
                 await update.message.reply_text(
                     f"🔗 သင်၏ Deep Link\n\n"
                     f"{deep_link}\n\n"
@@ -240,13 +238,11 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ...")
+    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ... (စာလုံးရေ ကန့်သတ်ချက်မရှိ၊ Telegram Premium အပြည့်အဝထောက်ပံ့သည်)")
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(update.message.text) > 1024:
-        await update.message.reply_text("❌ စာသားအရမ်းရှည်နေပါသည်။ စာလုံးရေ 1024 အောက်သာ ရေးပေးပါ။")
-        return CAPTION
+    # No length check anymore - let Telegram API handle it
     context.user_data['caption'] = update.message.text
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
@@ -280,6 +276,7 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ သို့မဟုတ် စာသား မှားယွင်းနေပါသည်။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
+        # Try to send photo with caption (may fail if caption too long, but we let it try)
         await update.message.reply_photo(
             photo=poster,
             caption=caption_text,
