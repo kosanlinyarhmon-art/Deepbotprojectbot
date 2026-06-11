@@ -9,8 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
-from telegraph import Telegraph
-from telegraph.exceptions import RetryAfterError
+from telegraph import Telegraph  # Telegraph Library ထည့်သွင်းခြင်း
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -75,42 +74,7 @@ def get_file_info(payload):
         return {"file_id": doc["file_id"], "file_name": doc["file_name"]}
     return None
 
-# ---------- Telegraph Setup ----------
-TELEGRAPH_TOKEN = os.environ.get("TELEGRAPH_TOKEN")
-telegraph = None
-if TELEGRAPH_TOKEN:
-    telegraph = Telegraph(access_token=TELEGRAPH_TOKEN)
-else:
-    # Create a new account once (run this locally or first time)
-    telegraph = Telegraph()
-    try:
-        telegraph.create_account(short_name="Movie Bot", author_name="Movie Bot")
-        logger.info(f"Telegraph account created. Token: {telegraph.get_access_token()}")
-        print(f"\n\n=== SAVE THIS TOKEN IN RENDER ENV VAR 'TELEGRAPH_TOKEN' ===\n{telegraph.get_access_token()}\n==========================================\n")
-    except Exception as e:
-        logger.error(f"Failed to create Telegraph account: {e}")
-
-async def create_telegraph_page(title: str, content: str) -> str:
-    """Create a telegraph page and return URL"""
-    if not telegraph:
-        return None
-    try:
-        # Format content with HTML paragraph
-        html_content = content.replace("\n", "<br>")
-        response = telegraph.create_page(
-            title=title,
-            html_content=f"<p>{html_content}</p>",
-            author_name="Movie Bot"
-        )
-        return response["url"]
-    except RetryAfterError as e:
-        logger.warning(f"Telegraph rate limit: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Telegraph error: {e}")
-        return None
-
-# ---------- Configuration ----------
+# ---------- Telegram Configuration ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
@@ -133,43 +97,26 @@ async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     except:
         return False
 
-# ---------- /telegraph Command ----------
-async def telegraph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
-        return
-    await update.message.reply_text(
-        "📝 ဇာတ်ညွှန်း (သို့) စာသားရှည်ကို ပို့ပေးပါ။\n"
-        "ကျွန်ုပ်က Telegraph မှာ တင်ပေးပြီး Link ထုတ်ပေးပါမည်။\n\n"
-        "စာသားပို့ရန် /cancel ဖြင့် ဖျက်နိုင်ပါသည်။"
-    )
-    context.user_data['waiting_for_telegraph'] = True
+# ---------- Telegraph Functions ----------
+telegraph = Telegraph()
+telegraph.create_account(short_name=BOT_USERNAME or 'MovieBot')
 
-async def handle_telegraph_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    if context.user_data.get('waiting_for_telegraph'):
-        text = update.message.text
-        if len(text) < 10:
-            await update.message.reply_text("စာသား အနည်းဆုံး ၁၀ လုံးရှိရပါမယ်။ ထပ်ရေးပါ။")
-            return
-        
-        # Create telegraph page
-        title = f"Movie Story {secrets.token_hex(4)}"
-        url = await create_telegraph_page(title, text)
-        
-        if url:
-            await update.message.reply_text(
-                f"✅ **Telegraph Post တင်ပြီးပါပြီ**\n\n"
-                f"🔗 {url}\n\n"
-                f"ဤလင့်ကို /newpost ဖန်တီးရာတွင် စာသားထဲမှာ ထည့်သုံးနိုင်ပါသည်။",
-                parse_mode="Markdown"
-            )
-            # Store in user_data for later use (optional)
-            context.user_data['last_telegraph_url'] = url
-        else:
-            await update.message.reply_text("❌ Telegraph တင်ရာတွင် အမှားရှိသည်။ နောက်မှထပ်စမ်းပါ။")
-        context.user_data.pop('waiting_for_telegraph', None)
+async def create_telegraph_page(title: str, content_text: str) -> str:
+    """
+    ရှည်လျားသော စာသားကို Telegraph တွင် Page တစ်ခုအဖြစ် ဖန်တီးပြီး ၎င်း၏ URL ကို ပြန်ပေးသည်။
+    """
+    try:
+        # စာသားကို Telegraph အတွက် HTML Format ပြောင်းပါ
+        nodes = [{"tag": "p", "children": [content_text]}]
+        response = await asyncio.to_thread(telegraph.create_page,
+            title=title,
+            html_content=content_text,
+            author_name="Movie Bot"
+        )
+        return response['url']
+    except Exception as e:
+        logger.error(f"Telegraph page creation failed: {e}")
+        return None
 
 # ---------- Start & Deep Link Handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,7 +197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🎬 **မင်္ဂလာပါ Admin**\n\n"
                 "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n\n"
                 "/newpost - 🆕 ပို့စ်အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
-                "/telegraph - 📝 စာသားရှည်ကို Telegraph မှာ တင်ရန်\n"
+                "/synopsis - 📝 Telegraph ဖြင့် ဇာတ်ညွှန်း Page ဖန်တီးရန်\n"
                 "/link - 🔗 Video ပို့ပါက Deep Link ထုတ်ပေးမည်\n"
                 "/stats - 📊 စာရင်းအင်းကြည့်ရန်\n"
                 "/broadcast - 📢 အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
@@ -299,8 +246,56 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command ----------
-POSTER, CAPTION, VIDEO_FILE = range(3)
+# ---------- /synopsis Command (Telegraph Integration) ----------
+# States for /synopsis conversation
+SYNOPSIS_TITLE, SYNOPSIS_CONTENT = range(2)
+
+async def synopsis_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return ConversationHandler.END
+    await update.message.reply_text("📝 ဇာတ်ညွှန်းအတွက် **ခေါင်းစဉ် (Title)** ကို ရိုက်ထည့်ပေးပါ...")
+    return SYNOPSIS_TITLE
+
+async def synopsis_receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['synopsis_title'] = update.message.text
+    await update.message.reply_text("✍️ ဇာတ်ညွှန်း အကြောင်းအရာ (စာသား) ကို ပို့ပေးပါ။ (စာလုံးရေ အကန့်အသတ်မရှိ)")
+    return SYNOPSIS_CONTENT
+
+async def synopsis_receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    title = context.user_data.get('synopsis_title')
+    content = update.message.text
+
+    await update.message.reply_text("⏳ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
+
+    # Telegraph Page ဖန်တီးပါ
+    page_url = await create_telegraph_page(title, content)
+
+    if page_url:
+        # Inline Keyboard တစ်ခု ဖန်တီးပြီး လင့်ကို ခလုတ်အဖြစ် ထည့်ပါ
+        keyboard = [[InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=page_url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"✅ **Telegraph စာမျက်နှာ အောင်မြင်စွာ ဖန်တီးပြီးပါပြီ။**\n\n"
+            f"**ခေါင်းစဉ်:** {title}\n"
+            f"**လင့် (Link):** {page_url}",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားအယွင်း ရှိနေပါသည်။")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel_synopsis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ---------- /newpost Command (ပုံ + စာ + Video) with Telegraph Support ----------
+POSTER, CAPTION, VIDEO_FILE, SYNOPSIS_LINK = range(4)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -314,7 +309,7 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ... (Telegraph Link ကိုလည်း ထည့်နိုင်ပါသည်)")
+    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား (အကျဉ်းချုပ်) ရေးပေးပါ...")
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -341,8 +336,16 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         payload = generate_payload()
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-        button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
-        reply_markup = InlineKeyboardMarkup([[button]])
+        movie_button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
+        
+        # Telegraph လင့် ရှိမရှိ စစ်ဆေးပါ
+        synopsis_url = context.user_data.get('synopsis_url', None)
+        buttons = [[movie_button]]
+        if synopsis_url:
+            synopsis_button = InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)
+            buttons.append([synopsis_button])
+        
+        reply_markup = InlineKeyboardMarkup(buttons)
 
         poster = context.user_data.get('poster')
         caption_text = context.user_data.get('caption')
@@ -351,22 +354,22 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ သို့မဟုတ် စာသား မှားယွင်းနေပါသည်။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Send photo with button only (no caption)
+        # ပုံကို ပထမဆုံးပို့ပါ (Button များနှင့်တွဲ)
         await update.message.reply_photo(
             photo=poster,
             reply_markup=reply_markup
         )
-        # Send caption as separate message (can include telegraph link, long text allowed)
+        # ထို့နောက် စာသားကို ပို့ပါ
         await update.message.reply_text(caption_text)
         
-        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message နှစ်ခုကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။\n(ပုံ → စာသား အစဉ်အတိုင်း)")
+        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message နှစ်ခုကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → စာသား ဆိုတဲ့ အစဉ်အတိုင်း)")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
         await update.message.reply_text(f"❌ Post ဖန်တီးရာတွင် အမှား: {str(e)}")
         return ConversationHandler.END
 
-async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
     context.user_data.clear()
     return ConversationHandler.END
@@ -438,8 +441,18 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# Conversation for /newpost
-conv_handler = ConversationHandler(
+# Conversation Handler for /synopsis
+synopsis_handler = ConversationHandler(
+    entry_points=[CommandHandler('synopsis', synopsis_start)],
+    states={
+        SYNOPSIS_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, synopsis_receive_title)],
+        SYNOPSIS_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, synopsis_receive_content)],
+    },
+    fallbacks=[CommandHandler('cancel', cancel_synopsis)],
+)
+
+# Conversation Handler for /newpost
+newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
         POSTER: [MessageHandler(filters.PHOTO, receive_poster)],
@@ -449,14 +462,12 @@ conv_handler = ConversationHandler(
             MessageHandler(filters.Document.VIDEO, receive_video_for_post)
         ],
     },
-    fallbacks=[CommandHandler('cancel', cancel_conv)],
+    fallbacks=[CommandHandler('cancel', cancel_newpost)],
 )
 
-# Add handlers
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("telegraph", telegraph_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_telegraph_text))
-application.add_handler(conv_handler)
+application.add_handler(newpost_handler)
+application.add_handler(synopsis_handler)  # Command အသစ်
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
 application.add_handler(CommandHandler("broadcast", broadcast))
@@ -469,7 +480,7 @@ application.add_handler(CommandHandler("cancelschedule", cancelschedule))
 application.add_handler(CommandHandler("delete", delete_file))
 application.add_handler(CommandHandler("deleteall", deleteall))
 
-# ---------- Polling (FIXED for Python 3.14) ----------
+# ---------- Polling ----------
 def run_bot():
     while True:
         try:
