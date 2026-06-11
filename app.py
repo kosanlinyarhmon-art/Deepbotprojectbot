@@ -238,11 +238,10 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ... (စာလုံးရေ ကန့်သတ်ချက်မရှိ၊ Telegram Premium အပြည့်အဝထောက်ပံ့သည်)")
+    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ...")
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # No length check anymore - let Telegram API handle it
     context.user_data['caption'] = update.message.text
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
@@ -276,13 +275,15 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ သို့မဟုတ် စာသား မှားယွင်းနေပါသည်။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Try to send photo with caption (may fail if caption too long, but we let it try)
+        # FIX: Photo ကို caption မပါဘဲ ပို့ပါ (button နဲ့တွဲ)
         await update.message.reply_photo(
             photo=poster,
-            caption=caption_text,
             reply_markup=reply_markup
         )
-        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
+        # စာသားကို သီးခြားပို့ပါ (ဘယ်လောက်ရှည်ရှည် ရပါပြီ)
+        await update.message.reply_text(caption_text)
+        
+        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message နှစ်ခုကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → စာသား ဆိုတဲ့ အစဉ်အတိုင်း)")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
