@@ -198,10 +198,11 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
     context.user_data['waiting_for_video_link'] = True
 
+# ✅ FIXED: parse_mode လုံးဝမပါအောင် ပြင်ထားပါ
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-
+    
     if context.user_data.get('waiting_for_video_link'):
         video = update.message.video
         if video:
@@ -210,13 +211,13 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 file_name = video.file_name or "ဇာတ်ကား"
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+                
+                # parse_mode ကို လုံးဝ မသုံးပါနဲ့ (default None)
                 await update.message.reply_text(
-                    f"🔗 **သင်၏ Deep Link**\n\n"
+                    f"🔗 သင်၏ Deep Link\n\n"
                     f"{deep_link}\n\n"
-                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် **{file_name}** ကို ချက်ချင်းရရှိမည်။\n"
-                    f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။",
-                    parse_mode="Markdown",
-                    disable_web_page_preview=False
+                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် {file_name} ကို ချက်ချင်းရရှိမည်။\n"
+                    f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
                 )
             except Exception as e:
                 await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
@@ -394,7 +395,6 @@ application.add_handler(CommandHandler("deleteall", deleteall))
 def run_bot():
     while True:
         try:
-            # Create a new event loop for this thread (fix for Python 3.14)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             logger.info("Starting bot polling...")
