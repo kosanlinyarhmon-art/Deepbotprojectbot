@@ -4,12 +4,13 @@ import threading
 import logging
 import sys
 import secrets
+from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
-from telegraph import Telegraph  # Telegraph Library ထည့်သွင်းခြင်း
+from telegraph import Telegraph
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -102,15 +103,14 @@ telegraph = Telegraph()
 telegraph.create_account(short_name=BOT_USERNAME or 'MovieBot')
 
 async def create_telegraph_page(title: str, content_text: str) -> str:
-    """
-    ရှည်လျားသော စာသားကို Telegraph တွင် Page တစ်ခုအဖြစ် ဖန်တီးပြီး ၎င်း၏ URL ကို ပြန်ပေးသည်။
-    """
+    """Create a Telegraph page and return its URL."""
     try:
-        # စာသားကို Telegraph အတွက် HTML Format ပြောင်းပါ
-        nodes = [{"tag": "p", "children": [content_text]}]
-        response = await asyncio.to_thread(telegraph.create_page,
+        # Convert plain text to HTML with <p> tags and line breaks
+        html_content = content_text.replace('\n', '<br>')
+        response = await asyncio.to_thread(
+            telegraph.create_page,
             title=title,
-            html_content=content_text,
+            html_content=f"<p>{html_content}</p>",
             author_name="Movie Bot"
         )
         return response['url']
@@ -197,7 +197,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🎬 **မင်္ဂလာပါ Admin**\n\n"
                 "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n\n"
                 "/newpost - 🆕 ပို့စ်အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
-                "/synopsis - 📝 Telegraph ဖြင့် ဇာတ်ညွှန်း Page ဖန်တီးရန်\n"
                 "/link - 🔗 Video ပို့ပါက Deep Link ထုတ်ပေးမည်\n"
                 "/stats - 📊 စာရင်းအင်းကြည့်ရန်\n"
                 "/broadcast - 📢 အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
@@ -246,56 +245,8 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /synopsis Command (Telegraph Integration) ----------
-# States for /synopsis conversation
-SYNOPSIS_TITLE, SYNOPSIS_CONTENT = range(2)
-
-async def synopsis_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
-        return ConversationHandler.END
-    await update.message.reply_text("📝 ဇာတ်ညွှန်းအတွက် **ခေါင်းစဉ် (Title)** ကို ရိုက်ထည့်ပေးပါ...")
-    return SYNOPSIS_TITLE
-
-async def synopsis_receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['synopsis_title'] = update.message.text
-    await update.message.reply_text("✍️ ဇာတ်ညွှန်း အကြောင်းအရာ (စာသား) ကို ပို့ပေးပါ။ (စာလုံးရေ အကန့်အသတ်မရှိ)")
-    return SYNOPSIS_CONTENT
-
-async def synopsis_receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    title = context.user_data.get('synopsis_title')
-    content = update.message.text
-
-    await update.message.reply_text("⏳ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
-
-    # Telegraph Page ဖန်တီးပါ
-    page_url = await create_telegraph_page(title, content)
-
-    if page_url:
-        # Inline Keyboard တစ်ခု ဖန်တီးပြီး လင့်ကို ခလုတ်အဖြစ် ထည့်ပါ
-        keyboard = [[InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=page_url)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(
-            f"✅ **Telegraph စာမျက်နှာ အောင်မြင်စွာ ဖန်တီးပြီးပါပြီ။**\n\n"
-            f"**ခေါင်းစဉ်:** {title}\n"
-            f"**လင့် (Link):** {page_url}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားအယွင်း ရှိနေပါသည်။")
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def cancel_synopsis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-# ---------- /newpost Command (ပုံ + စာ + Video) with Telegraph Support ----------
-POSTER, CAPTION, VIDEO_FILE, SYNOPSIS_LINK = range(4)
+# ---------- /newpost Command with Auto Telegraph for Long Text ----------
+POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -309,11 +260,32 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား (အကျဉ်းချုပ်) ရေးပေးပါ...")
+    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား (ဇာတ်ညွှန်း) ရေးပေးပါ...\n(စာသားရှည်ပါက Telegraph တွင် အလိုအလျောက် တင်ပေးပါမည်)")
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['caption'] = update.message.text
+    caption_text = update.message.text
+    context.user_data['caption_full'] = caption_text
+    context.user_data['telegraph_url'] = None
+
+    # If longer than 1024 chars, create Telegraph page automatically
+    if len(caption_text) > 1024:
+        await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph တွင် စာမျက်နှာ ဖန်တီးနေပါပြီ...")
+        try:
+            title = f"Movie Synopsis - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            page_url = await create_telegraph_page(title, caption_text)
+            if page_url:
+                context.user_data['telegraph_url'] = page_url
+                await update.message.reply_text(f"✅ Telegraph စာမျက်နှာ ဖန်တီးပြီးပါပြီ။\n\nဇာတ်ညွှန်းအပြည့်အစုံကို ဤလင့်တွင် ဖတ်ရှုနိုင်ပါသည်။\n{page_url}")
+            else:
+                await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။ စာသားကို ဆက်လက်အသုံးပြုပါမည်။")
+        except Exception as e:
+            logger.error(f"Telegraph creation failed: {e}")
+            await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
+    else:
+        # Short text, no Telegraph needed
+        pass
+
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
 
@@ -333,36 +305,52 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         if not file_name:
             file_name = "ဇာတ်ကား"
 
+        # Save video file info
         payload = generate_payload()
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+
+        # Prepare buttons
         movie_button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
-        
-        # Telegraph လင့် ရှိမရှိ စစ်ဆေးပါ
-        synopsis_url = context.user_data.get('synopsis_url', None)
         buttons = [[movie_button]]
+
+        synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
             synopsis_button = InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)
             buttons.append([synopsis_button])
-        
+
         reply_markup = InlineKeyboardMarkup(buttons)
 
         poster = context.user_data.get('poster')
-        caption_text = context.user_data.get('caption')
+        caption_full = context.user_data.get('caption_full', '')
 
-        if not poster or not caption_text:
-            await update.message.reply_text("ပုံ သို့မဟုတ် စာသား မှားယွင်းနေပါသည်။ /newpost ကို ထပ်မံစတင်ပါ။")
+        if not poster:
+            await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # ပုံကို ပထမဆုံးပို့ပါ (Button များနှင့်တွဲ)
+        # Send photo with buttons
         await update.message.reply_photo(
             photo=poster,
             reply_markup=reply_markup
         )
-        # ထို့နောက် စာသားကို ပို့ပါ
-        await update.message.reply_text(caption_text)
-        
-        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message နှစ်ခုကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → စာသား ဆိုတဲ့ အစဉ်အတိုင်း)")
+
+        # Send caption (if short) or preview (if long and Telegraph used)
+        if synopsis_url:
+            # Send a short preview (first 300 chars)
+            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
+            await update.message.reply_text(
+                f"📝 **ဇာတ်ကားအကျဉ်းချုပ်**\n\n{preview}\n\n🔗 **ဇာတ်ညွှန်းအပြည့်အစုံဖတ်ရန်:** [Click Here]({synopsis_url})",
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+        else:
+            # Send full caption (within 1024 chars)
+            await update.message.reply_text(
+                f"📝 **ဇာတ်ကားအကြောင်း**\n\n{caption_full}",
+                parse_mode="Markdown"
+            )
+
+        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message များကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → အကြောင်းအရာ)")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
@@ -441,17 +429,7 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# Conversation Handler for /synopsis
-synopsis_handler = ConversationHandler(
-    entry_points=[CommandHandler('synopsis', synopsis_start)],
-    states={
-        SYNOPSIS_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, synopsis_receive_title)],
-        SYNOPSIS_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, synopsis_receive_content)],
-    },
-    fallbacks=[CommandHandler('cancel', cancel_synopsis)],
-)
-
-# Conversation Handler for /newpost
+# Conversation for /newpost
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
@@ -467,7 +445,6 @@ newpost_handler = ConversationHandler(
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
-application.add_handler(synopsis_handler)  # Command အသစ်
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
 application.add_handler(CommandHandler("broadcast", broadcast))
