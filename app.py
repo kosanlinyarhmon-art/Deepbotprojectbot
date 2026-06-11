@@ -80,6 +80,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
+MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")  # သီချင်း/တရားတော်ချန်နယ်
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
@@ -107,7 +108,6 @@ except:
 
 async def create_telegraph_page(title: str, content_text: str) -> str:
     try:
-        # Convert plain text to HTML with <p> and line breaks
         html_content = content_text.replace('\n', '<br>')
         response = await asyncio.to_thread(
             telegraph.create_page,
@@ -175,20 +175,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
+                # Build channel invite buttons
+                keyboard = []
                 if OTHER_CHANNELS:
-                    keyboard = []
-                    if len(OTHER_CHANNELS) >= 1:
-                        keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=OTHER_CHANNELS[0])])
-                    if len(OTHER_CHANNELS) >= 2:
-                        keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=OTHER_CHANNELS[1])])
-                    if keyboard:
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text="🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
-                            reply_markup=reply_markup,
-                            parse_mode="Markdown"
-                        )
+                    for idx, link in enumerate(OTHER_CHANNELS, 1):
+                        if idx == 1:
+                            keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
+                        elif idx == 2:
+                            keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
+                        else:
+                            keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
+                if MUSIC_CHANNEL_LINK:
+                    keyboard.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
+
+                if keyboard:
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text="🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
+                        reply_markup=reply_markup,
+                        parse_mode="Markdown"
+                    )
             except Exception as e:
                 await context.bot.send_message(chat_id=user_id, text=f"❌ Video ပို့ရာတွင် အမှား: {str(e)}")
         else:
@@ -270,7 +277,6 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption_full'] = caption_text
     context.user_data['telegraph_url'] = None
 
-    # Check if longer than 1024 chars -> create Telegraph page
     if len(caption_text) > 1024:
         await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
         try:
@@ -310,13 +316,28 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
 
-        movie_button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
-        buttons = [[movie_button]]
+        # Buttons array
+        buttons = []
+        buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
 
+        # Telegraph synopsis button if exists
         synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
-            synopsis_button = InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)
-            buttons.append([synopsis_button])
+            buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
+
+        # Other channel buttons from OTHER_CHANNELS
+        if OTHER_CHANNELS:
+            for idx, link in enumerate(OTHER_CHANNELS, 1):
+                if idx == 1:
+                    buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
+                elif idx == 2:
+                    buttons.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
+                else:
+                    buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
+
+        # Music/Religion channel button
+        if MUSIC_CHANNEL_LINK:
+            buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
         reply_markup = InlineKeyboardMarkup(buttons)
 
@@ -328,26 +349,22 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Send photo with buttons
+        # Send photo with buttons (caption includes the synopsis preview or full text)
+        photo_caption = ""
+        if telegraph_url:
+            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
+            photo_caption = f"📝 **ဇာတ်ကားအကျဉ်းချုပ်**\n\n{preview}\n\n🔗 **အပြည့်အစုံဖတ်ရန်:** {telegraph_url}"
+        else:
+            photo_caption = f"📝 **ဇာတ်ကားအကြောင်း**\n\n{caption_full}"
+
         await update.message.reply_photo(
             photo=poster,
-            reply_markup=reply_markup
+            caption=photo_caption,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
 
-        # Send caption as plain text (no parse_mode) to avoid Markdown errors
-        if telegraph_url:
-            # Short preview + link
-            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-            await update.message.reply_text(
-                f"📝 **ဇာတ်ကားအကျဉ်းချုပ်**\n\n{preview}\n\n🔗 **ဇာတ်ညွှန်းအပြည့်အစုံဖတ်ရန်:** {telegraph_url}"
-            )
-        else:
-            # Send full caption as plain text (no parse_mode)
-            await update.message.reply_text(
-                f"📝 **ဇာတ်ကားအကြောင်း**\n\n{caption_full}"
-            )
-
-        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message များကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → အကြောင်းအရာ)")
+        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
@@ -422,7 +439,6 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# Conversation for /newpost
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
