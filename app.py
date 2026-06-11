@@ -1,7 +1,6 @@
 import os
 import asyncio
 import threading
-import json
 import logging
 import sys
 import secrets
@@ -9,6 +8,8 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.helpers import create_deep_linked_url
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -37,17 +38,60 @@ INVITE_LINK = os.environ.get("INVITE_LINK")
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
-DB_FILE = "bot_data.json"
+# ---------- MongoDB Connection ----------
+MONGO_URI = os.environ.get("MONGO_URI")
+if not MONGO_URI:
+    logger.error("MONGO_URI environment variable not set!")
+    sys.exit(1)
 
-def load_data():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    return {"users": [], "total_requests": 0, "file_store": {}}
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["telegram_bot"]
+users_collection = db["users"]
+stats_collection = db["stats"]
+file_store_collection = db["file_store"]
 
-def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f)
+# Ensure unique index on payload
+file_store_collection.create_index("payload", unique=True)
+
+def load_stats():
+    doc = stats_collection.find_one({"_id": "stats"})
+    if not doc:
+        return {"users": [], "total_requests": 0}
+    return {"users": doc.get("users", []), "total_requests": doc.get("total_requests", 0)}
+
+def save_stats(data):
+    stats_collection.update_one(
+        {"_id": "stats"},
+        {"$set": {"users": data["users"], "total_requests": data["total_requests"]}},
+        upsert=True
+    )
+
+def add_user(user_id):
+    stats_collection.update_one(
+        {"_id": "stats"},
+        {"$addToSet": {"users": user_id}},
+        upsert=True
+    )
+
+def increment_requests():
+    stats_collection.update_one(
+        {"_id": "stats"},
+        {"$inc": {"total_requests": 1}},
+        upsert=True
+    )
+
+def save_file(payload, file_id, file_name):
+    file_store_collection.update_one(
+        {"payload": payload},
+        {"$set": {"file_id": file_id, "file_name": file_name}},
+        upsert=True
+    )
+
+def get_file(payload):
+    doc = file_store_collection.find_one({"payload": payload})
+    if doc:
+        return doc.get("file_id"), doc.get("file_name")
+    return None, None
 
 async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -70,13 +114,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if context.args and len(context.args) > 0:
         payload = context.args[0]
-        data = load_data()
-        file_info = data["file_store"].get(payload)
+        file_id, file_name = get_file(payload)
         
-        if file_info:
-            file_id = file_info if isinstance(file_info, str) else file_info.get("file_id")
-            file_name = file_info.get("file_name") if isinstance(file_info, dict) else "ဇာတ်ကား"
-            
+        if file_id:
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 Channel သို့ဝင်ရန်: {INVITE_LINK}",
@@ -92,9 +132,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"🎬 သင့်ဇာတ်ကား - {file_name}"
                 )
                 
+                # Warning message with custom text
+                warn_text = (
+                    "!!! အရေးကြီးပါတယ်!!!\n\n"
+                    "ဤရုပ်ရှင်ဖိုင်များ/ဗီဒီယိုများကို 5 မိနစ်အတွင်း (မူပိုင်ခွင့်ပြဿနာများကြောင့်) ဖျက်ပါမည်။\n"
+                    "ကျေးဇူးပြု၍ ဤဖိုင်များ/ဗီဒီယိုများအားလုံးကို သင်၏ save မက်ဆေ့ချ်များသို့ ပေးပို့ပြီး ထိုနေရာတွင် ဇာတ်ကားအားကြည့်ရှုပါ။\n"
+                    "ကျွန်ုပ်၏ချန်နယ်ကိုလာရောက်အားပေးမှု့အတွက်ကျေးဇူးအထူးတင်ပါတယ်🙏🙏🙏။\n"
+                    "(ချန်နယ်ရေရှည်တည်တဲ့ဖို့အတွက် Support ပေးချင်ပါက Wave_09767011991 ကို ကူညီနိုင်ပါတယ်)\n"
+                    "အားလုံးကိုကျေးဇူးတင်ပါတယ်။\n\n"
+                    "!!! IMPORTANT!!!\n\n"
+                    "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
+                    "Please forward this ALL Files/Videos to your Saved Messages and Start Download there"
+                )
                 warn_msg = await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"⚠️ သတိပေးချက်\n\nဤဇာတ်ကား ({file_name}) ကို ၅ မိနစ် အတွင်း ဖျက်ပါမည်။\nကျေးဇူးပြု၍ Forward လုပ်ပြီး သိမ်းထားပါ။"
+                    text=warn_text
                 )
                 
                 async def delete_after():
@@ -106,10 +158,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
                 asyncio.create_task(delete_after())
                 
-                if user_id not in data["users"]:
-                    data["users"].append(user_id)
-                data["total_requests"] += 1
-                save_data(data)
+                add_user(user_id)
+                increment_requests()
                 
                 if OTHER_CHANNELS:
                     keyboard = []
@@ -164,19 +214,15 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         if video:
             try:
                 payload = generate_payload()
-                data = load_data()
-                data["file_store"][payload] = {
-                    "file_id": video.file_id,
-                    "file_name": video.file_name or "ဇာတ်ကား"
-                }
-                save_data(data)
+                file_name = video.file_name or "ဇာတ်ကား"
+                save_file(payload, video.file_id, file_name)
                 
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 
                 await update.message.reply_text(
                     f"🔗 သင်၏ Deep Link\n\n"
                     f"{deep_link}\n\n"
-                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် {video.file_name or 'ဇာတ်ကား'} ကို ချက်ချင်းရရှိမည်။\n"
+                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် {file_name} ကို ချက်ချင်းရရှိမည်။\n"
                     f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
                 )
             except Exception as e:
@@ -209,7 +255,6 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return VIDEO_FILE
 
 async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if it's a video
     video = None
     if update.message.video:
         video = update.message.video
@@ -222,18 +267,11 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
     
     try:
         file_name = getattr(video, 'file_name', None)
-        if not file_name and hasattr(video, 'file_name'):
-            file_name = video.file_name
         if not file_name:
             file_name = "ဇာတ်ကား"
         
         payload = generate_payload()
-        data = load_data()
-        data["file_store"][payload] = {
-            "file_id": video.file_id,
-            "file_name": file_name
-        }
-        save_data(data)
+        save_file(payload, video.file_id, file_name)
         
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
         button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
@@ -271,7 +309,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         await update.message.reply_text("📢 /broadcast <message>")
         return
-    data = load_data()
+    data = load_stats()
     count = 0
     for uid in data["users"]:
         try:
@@ -284,7 +322,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    data = load_data()
+    data = load_stats()
     await update.message.reply_text(f"📊 စာရင်းအင်း\n\n👥 အသုံးပြုသူဦးရေ: {len(data['users'])}\n🎬 တောင်းဆိုမှုအရေအတွက်: {data['total_requests']}")
 
 async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,7 +367,6 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# Conversation for /newpost
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
