@@ -133,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "🎬 မင်္ဂလာပါ Admin။\n\n"
                 "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n"
-                "/network - Channel Post အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
+                "/newpost - Channel Post အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
                 "/link - Video ပို့ပါက Deep Link ထုတ်ပေးမည်\n"
                 "/stats - စာရင်းအင်းကြည့်ရန်\n"
                 "/broadcast - အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
@@ -173,7 +173,6 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 
-                # Fixed: No parse_mode to avoid errors
                 await update.message.reply_text(
                     f"🔗 သင်၏ Deep Link\n\n"
                     f"{deep_link}\n\n"
@@ -186,10 +185,10 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /network Command ----------
+# ---------- /newpost Command ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
-async def network_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
@@ -210,34 +209,54 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return VIDEO_FILE
 
 async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.video:
-        await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
+    # Check if it's a video
+    video = None
+    if update.message.video:
+        video = update.message.video
+    elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith('video/'):
+        video = update.message.document
+    
+    if not video:
+        await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ (video file သို့မဟုတ် document video)။")
         return VIDEO_FILE
     
-    video = update.message.video
-    payload = generate_payload()
-    data = load_data()
-    data["file_store"][payload] = {
-        "file_id": video.file_id,
-        "file_name": video.file_name or "ဇာတ်ကား"
-    }
-    save_data(data)
-    
-    deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-    button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
-    reply_markup = InlineKeyboardMarkup([[button]])
-    
-    poster = context.user_data['poster']
-    caption_text = context.user_data['caption']
-    
-    await update.message.reply_photo(
-        photo=poster,
-        caption=caption_text,
-        reply_markup=reply_markup
-    )
-    await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
-    context.user_data.clear()
-    return ConversationHandler.END
+    try:
+        file_name = getattr(video, 'file_name', None)
+        if not file_name and hasattr(video, 'file_name'):
+            file_name = video.file_name
+        if not file_name:
+            file_name = "ဇာတ်ကား"
+        
+        payload = generate_payload()
+        data = load_data()
+        data["file_store"][payload] = {
+            "file_id": video.file_id,
+            "file_name": file_name
+        }
+        save_data(data)
+        
+        deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+        button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
+        reply_markup = InlineKeyboardMarkup([[button]])
+        
+        poster = context.user_data.get('poster')
+        caption_text = context.user_data.get('caption')
+        
+        if not poster or not caption_text:
+            await update.message.reply_text("ပုံ သို့မဟုတ် စာသား မှားယွင်းနေပါသည်။ /newpost ကို ထပ်မံစတင်ပါ။")
+            return ConversationHandler.END
+        
+        await update.message.reply_photo(
+            photo=poster,
+            caption=caption_text,
+            reply_markup=reply_markup
+        )
+        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Post ဖန်တီးရာတွင် အမှား: {str(e)}")
+        return ConversationHandler.END
 
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
@@ -310,12 +329,16 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
+# Conversation for /newpost
 conv_handler = ConversationHandler(
-    entry_points=[CommandHandler('network', network_start)],
+    entry_points=[CommandHandler('newpost', newpost_start)],
     states={
         POSTER: [MessageHandler(filters.PHOTO, receive_poster)],
         CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption)],
-        VIDEO_FILE: [MessageHandler(filters.VIDEO, receive_video_for_post)],
+        VIDEO_FILE: [
+            MessageHandler(filters.VIDEO, receive_video_for_post),
+            MessageHandler(filters.Document.VIDEO, receive_video_for_post)
+        ],
     },
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
