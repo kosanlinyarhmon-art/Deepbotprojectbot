@@ -80,7 +80,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
-MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")  # သီချင်း/တရားတော်ချန်နယ်
+MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
@@ -175,7 +175,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
-                # Build channel invite buttons
                 keyboard = []
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
@@ -320,12 +319,10 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
 
-        # Telegraph synopsis button if exists
         synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
             buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
 
-        # Other channel buttons from OTHER_CHANNELS
         if OTHER_CHANNELS:
             for idx, link in enumerate(OTHER_CHANNELS, 1):
                 if idx == 1:
@@ -335,7 +332,6 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
                 else:
                     buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
 
-        # Music/Religion channel button
         if MUSIC_CHANNEL_LINK:
             buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
@@ -349,19 +345,18 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Send photo with buttons (caption includes the synopsis preview or full text)
-        photo_caption = ""
+        # Build photo caption (plain text, no parse_mode to avoid errors)
         if telegraph_url:
             preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-            photo_caption = f"📝 **ဇာတ်ကားအကျဉ်းချုပ်**\n\n{preview}\n\n🔗 **အပြည့်အစုံဖတ်ရန်:** {telegraph_url}"
+            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}\n\n🔗 အပြည့်အစုံဖတ်ရန်: {telegraph_url}"
         else:
-            photo_caption = f"📝 **ဇာတ်ကားအကြောင်း**\n\n{caption_full}"
+            photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
+        # Send photo WITHOUT parse_mode to avoid Markdown errors
         await update.message.reply_photo(
             photo=poster,
             caption=photo_caption,
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
+            reply_markup=reply_markup
         )
 
         await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
