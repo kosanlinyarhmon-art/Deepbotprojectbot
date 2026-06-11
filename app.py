@@ -9,6 +9,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
+from telegraph import Telegraph
+from telegraph.exceptions import RetryAfterError
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -73,6 +75,41 @@ def get_file_info(payload):
         return {"file_id": doc["file_id"], "file_name": doc["file_name"]}
     return None
 
+# ---------- Telegraph Setup ----------
+TELEGRAPH_TOKEN = os.environ.get("TELEGRAPH_TOKEN")
+telegraph = None
+if TELEGRAPH_TOKEN:
+    telegraph = Telegraph(access_token=TELEGRAPH_TOKEN)
+else:
+    # Create a new account once (run this locally or first time)
+    telegraph = Telegraph()
+    try:
+        telegraph.create_account(short_name="Movie Bot", author_name="Movie Bot")
+        logger.info(f"Telegraph account created. Token: {telegraph.get_access_token()}")
+        print(f"\n\n=== SAVE THIS TOKEN IN RENDER ENV VAR 'TELEGRAPH_TOKEN' ===\n{telegraph.get_access_token()}\n==========================================\n")
+    except Exception as e:
+        logger.error(f"Failed to create Telegraph account: {e}")
+
+async def create_telegraph_page(title: str, content: str) -> str:
+    """Create a telegraph page and return URL"""
+    if not telegraph:
+        return None
+    try:
+        # Format content with HTML paragraph
+        html_content = content.replace("\n", "<br>")
+        response = telegraph.create_page(
+            title=title,
+            html_content=f"<p>{html_content}</p>",
+            author_name="Movie Bot"
+        )
+        return response["url"]
+    except RetryAfterError as e:
+        logger.warning(f"Telegraph rate limit: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Telegraph error: {e}")
+        return None
+
 # ---------- Configuration ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
@@ -95,6 +132,44 @@ async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
         return member.status in ["member", "administrator", "creator"]
     except:
         return False
+
+# ---------- /telegraph Command ----------
+async def telegraph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+    await update.message.reply_text(
+        "📝 ဇာတ်ညွှန်း (သို့) စာသားရှည်ကို ပို့ပေးပါ။\n"
+        "ကျွန်ုပ်က Telegraph မှာ တင်ပေးပြီး Link ထုတ်ပေးပါမည်။\n\n"
+        "စာသားပို့ရန် /cancel ဖြင့် ဖျက်နိုင်ပါသည်။"
+    )
+    context.user_data['waiting_for_telegraph'] = True
+
+async def handle_telegraph_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if context.user_data.get('waiting_for_telegraph'):
+        text = update.message.text
+        if len(text) < 10:
+            await update.message.reply_text("စာသား အနည်းဆုံး ၁၀ လုံးရှိရပါမယ်။ ထပ်ရေးပါ။")
+            return
+        
+        # Create telegraph page
+        title = f"Movie Story {secrets.token_hex(4)}"
+        url = await create_telegraph_page(title, text)
+        
+        if url:
+            await update.message.reply_text(
+                f"✅ **Telegraph Post တင်ပြီးပါပြီ**\n\n"
+                f"🔗 {url}\n\n"
+                f"ဤလင့်ကို /newpost ဖန်တီးရာတွင် စာသားထဲမှာ ထည့်သုံးနိုင်ပါသည်။",
+                parse_mode="Markdown"
+            )
+            # Store in user_data for later use (optional)
+            context.user_data['last_telegraph_url'] = url
+        else:
+            await update.message.reply_text("❌ Telegraph တင်ရာတွင် အမှားရှိသည်။ နောက်မှထပ်စမ်းပါ။")
+        context.user_data.pop('waiting_for_telegraph', None)
 
 # ---------- Start & Deep Link Handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,6 +250,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🎬 **မင်္ဂလာပါ Admin**\n\n"
                 "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n\n"
                 "/newpost - 🆕 ပို့စ်အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
+                "/telegraph - 📝 စာသားရှည်ကို Telegraph မှာ တင်ရန်\n"
                 "/link - 🔗 Video ပို့ပါက Deep Link ထုတ်ပေးမည်\n"
                 "/stats - 📊 စာရင်းအင်းကြည့်ရန်\n"
                 "/broadcast - 📢 အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
@@ -238,7 +314,7 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ...")
+    await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား ရေးပေးပါ... (Telegraph Link ကိုလည်း ထည့်နိုင်ပါသည်)")
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,15 +351,15 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ သို့မဟုတ် စာသား မှားယွင်းနေပါသည်။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # FIX: Photo ကို caption မပါဘဲ ပို့ပါ (button နဲ့တွဲ)
+        # Send photo with button only (no caption)
         await update.message.reply_photo(
             photo=poster,
             reply_markup=reply_markup
         )
-        # စာသားကို သီးခြားပို့ပါ (ဘယ်လောက်ရှည်ရှည် ရပါပြီ)
+        # Send caption as separate message (can include telegraph link, long text allowed)
         await update.message.reply_text(caption_text)
         
-        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message နှစ်ခုကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → စာသား ဆိုတဲ့ အစဉ်အတိုင်း)")
+        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message နှစ်ခုကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။\n(ပုံ → စာသား အစဉ်အတိုင်း)")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
@@ -362,6 +438,7 @@ async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
+# Conversation for /newpost
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
@@ -375,7 +452,10 @@ conv_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_conv)],
 )
 
+# Add handlers
 application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("telegraph", telegraph_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_telegraph_text))
 application.add_handler(conv_handler)
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
