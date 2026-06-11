@@ -175,6 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
+                # Build channel invite buttons for user after receiving movie
                 keyboard = []
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
@@ -182,6 +183,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
                         elif idx == 2:
                             keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
+                        elif idx == 3:
+                            keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
                         else:
                             keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
                 if MUSIC_CHANNEL_LINK:
@@ -319,19 +322,24 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
 
+        # Telegraph synopsis button if exists
         synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
             buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
 
+        # OTHER_CHANNELS buttons with custom names
         if OTHER_CHANNELS:
             for idx, link in enumerate(OTHER_CHANNELS, 1):
                 if idx == 1:
                     buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
                 elif idx == 2:
                     buttons.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
+                elif idx == 3:
+                    buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
                 else:
                     buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
 
+        # Optional extra music channel from env
         if MUSIC_CHANNEL_LINK:
             buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
@@ -345,14 +353,13 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Build photo caption (plain text, no parse_mode to avoid errors)
+        # Build photo caption (plain text, no parse_mode)
         if telegraph_url:
             preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
             photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}\n\n🔗 အပြည့်အစုံဖတ်ရန်: {telegraph_url}"
         else:
             photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
-        # Send photo WITHOUT parse_mode to avoid Markdown errors
         await update.message.reply_photo(
             photo=poster,
             caption=photo_caption,
