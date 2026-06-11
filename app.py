@@ -100,12 +100,14 @@ async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 # ---------- Telegraph Functions ----------
 telegraph = Telegraph()
-telegraph.create_account(short_name=BOT_USERNAME or 'MovieBot')
+try:
+    telegraph.create_account(short_name=BOT_USERNAME or 'MovieBot')
+except:
+    pass
 
 async def create_telegraph_page(title: str, content_text: str) -> str:
-    """Create a Telegraph page and return its URL."""
     try:
-        # Convert plain text to HTML with <p> tags and line breaks
+        # Convert plain text to HTML with <p> and line breaks
         html_content = content_text.replace('\n', '<br>')
         response = await asyncio.to_thread(
             telegraph.create_page,
@@ -115,7 +117,7 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         )
         return response['url']
     except Exception as e:
-        logger.error(f"Telegraph page creation failed: {e}")
+        logger.error(f"Telegraph error: {e}")
         return None
 
 # ---------- Start & Deep Link Handler ----------
@@ -245,7 +247,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command with Auto Telegraph for Long Text ----------
+# ---------- /newpost Command ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -268,9 +270,9 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption_full'] = caption_text
     context.user_data['telegraph_url'] = None
 
-    # If longer than 1024 chars, create Telegraph page automatically
+    # Check if longer than 1024 chars -> create Telegraph page
     if len(caption_text) > 1024:
-        await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph တွင် စာမျက်နှာ ဖန်တီးနေပါပြီ...")
+        await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
         try:
             title = f"Movie Synopsis - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             page_url = await create_telegraph_page(title, caption_text)
@@ -280,10 +282,9 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။ စာသားကို ဆက်လက်အသုံးပြုပါမည်။")
         except Exception as e:
-            logger.error(f"Telegraph creation failed: {e}")
+            logger.error(f"Telegraph error: {e}")
             await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
     else:
-        # Short text, no Telegraph needed
         pass
 
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
@@ -305,12 +306,10 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         if not file_name:
             file_name = "ဇာတ်ကား"
 
-        # Save video file info
         payload = generate_payload()
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
 
-        # Prepare buttons
         movie_button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
         buttons = [[movie_button]]
 
@@ -323,6 +322,7 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
 
         poster = context.user_data.get('poster')
         caption_full = context.user_data.get('caption_full', '')
+        telegraph_url = context.user_data.get('telegraph_url')
 
         if not poster:
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
@@ -334,20 +334,17 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=reply_markup
         )
 
-        # Send caption (if short) or preview (if long and Telegraph used)
-        if synopsis_url:
-            # Send a short preview (first 300 chars)
+        # Send caption as plain text (no parse_mode) to avoid Markdown errors
+        if telegraph_url:
+            # Short preview + link
             preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
             await update.message.reply_text(
-                f"📝 **ဇာတ်ကားအကျဉ်းချုပ်**\n\n{preview}\n\n🔗 **ဇာတ်ညွှန်းအပြည့်အစုံဖတ်ရန်:** [Click Here]({synopsis_url})",
-                parse_mode="Markdown",
-                disable_web_page_preview=True
+                f"📝 **ဇာတ်ကားအကျဉ်းချုပ်**\n\n{preview}\n\n🔗 **ဇာတ်ညွှန်းအပြည့်အစုံဖတ်ရန်:** {telegraph_url}"
             )
         else:
-            # Send full caption (within 1024 chars)
+            # Send full caption as plain text (no parse_mode)
             await update.message.reply_text(
-                f"📝 **ဇာတ်ကားအကြောင်း**\n\n{caption_full}",
-                parse_mode="Markdown"
+                f"📝 **ဇာတ်ကားအကြောင်း**\n\n{caption_full}"
             )
 
         await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message များကို **အတူတူ** Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။ (ပုံ → အကြောင်းအရာ)")
@@ -405,22 +402,18 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text("⏳ အချိန်ဇယား (လုပ်ဆောင်ဆဲ)")
-
 async def listschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text("📋 အချိန်ဇယားစာရင်း (လုပ်ဆောင်ဆဲ)")
-
 async def cancelschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text("❌ အချိန်ဇယားဖျက်ရန် (လုပ်ဆောင်ဆဲ)")
-
 async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text("🗑️ ဖိုင်ဖျက်ရန် (လုပ်ဆောင်ဆဲ)")
-
 async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
