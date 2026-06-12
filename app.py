@@ -364,11 +364,10 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=reply_markup
         )
 
-        # Send deep link separately (as text)
+        # FIX: Remove parse_mode="Markdown" to avoid entity parsing error
         await update.message.reply_text(
             f"**Deep Link (ဇာတ်ကားရယူရန်):**\n{deep_link}\n\n"
-            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်။",
-            parse_mode="Markdown"
+            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်。"
         )
 
         await update.message.reply_text("✅ **Post ဖန်တီးပြီးပါပြီ။**\n\nဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
