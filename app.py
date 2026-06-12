@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
 from telegraph import Telegraph
@@ -80,7 +80,6 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
-MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
@@ -99,7 +98,7 @@ async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     except:
         return False
 
-# ---------- Telegraph Functions ----------
+# ---------- Telegraph ----------
 telegraph = Telegraph()
 try:
     telegraph.create_account(short_name=BOT_USERNAME or 'MovieBot')
@@ -153,8 +152,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "ကျေးဇူးပြု၍ ဤဖိုင်များ/ဗီဒီယိုများအားလုံးကို သင်၏ Saved Messages များသို့ Forward လုပ်ပြီး ထိုနေရာတွင် ဇာတ်ကားအား ကြည့်ရှုပါ။\n\n"
                     "ကျွန်ုပ်၏ Channel ကို လာရောက်အားပေးမှုအတွက် ကျေးဇူးအထူးတင်ပါတယ် 🙏🙏🙏\n\n"
                     "Channel ရေရှည်တည်တံ့ဖို့အတွက် Support ပေးချင်ပါက Wave Pay (09767011991) ကို ကူညီနိုင်ပါတယ်။\n\n"
-                    "အားလုံးကို ကျေးဇူးတင်ပါတယ်။\n\n"
-                    "!!! IMPORTANT !!!\n"
+                    "အားလုံးကို ကျေးဇူးတင်ပါတယ်။\n\n!!! IMPORTANT !!!\n"
                     "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
                     "Please forward these ALL Files/Videos to your Saved Messages and start downloading there."
                 )
@@ -172,7 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
-                # Build channel invite buttons for user after receiving movie
+                # Channel invite buttons
                 keyboard = []
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
@@ -184,8 +182,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
                         else:
                             keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
-                if MUSIC_CHANNEL_LINK:
-                    keyboard.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
                 if keyboard:
                     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -253,7 +249,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command (Fixed - no telegraph link in caption) ----------
+# ---------- /newpost Command ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,7 +272,6 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption_full'] = caption_text
     context.user_data['telegraph_url'] = None
 
-    # Only create Telegraph page if text is too long, but we will NOT put link in caption
     if len(caption_text) > 1024:
         await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
         try:
@@ -290,7 +285,8 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Telegraph error: {e}")
             await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
-    # else: no telegraph needed
+    else:
+        pass
 
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
@@ -315,16 +311,16 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
 
-        # Buttons array
+        # Build buttons
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
 
-        # Telegraph synopsis button if exists (instead of putting link in caption)
+        # Telegraph synopsis button if exists
         synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
             buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
 
-        # OTHER_CHANNELS buttons with custom names as requested
+        # Channel buttons
         if OTHER_CHANNELS:
             for idx, link in enumerate(OTHER_CHANNELS, 1):
                 if idx == 1:
@@ -336,10 +332,6 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
                 else:
                     buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
 
-        # Optional extra music channel from env
-        if MUSIC_CHANNEL_LINK:
-            buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
-
         reply_markup = InlineKeyboardMarkup(buttons)
 
         poster = context.user_data.get('poster')
@@ -350,22 +342,24 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Build photo caption WITHOUT the telegraph link (only preview if needed)
-        if telegraph_url:
-            # Show only short preview, NO link here because button already has it
-            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
-        else:
-            # Short enough to show full caption
-            photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
+        # Build caption - NO telegraph link in caption
+        photo_caption = f"📝 {caption_full}" if caption_full else ""
 
+        # Send photo with buttons
         await update.message.reply_photo(
             photo=poster,
             caption=photo_caption,
             reply_markup=reply_markup
         )
 
-        await update.message.reply_text("✅ အဆင်သင့်ပါပြီ။ ဒီ Message ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
+        # Send deep link separately (like in Bot 2)
+        await update.message.reply_text(
+            f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
+            f"ဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။\n\n"
+            f"**Deep Link (ဇာတ်ကားရယူရန်):**\n{deep_link}\n\n"
+            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်။"
+        )
+
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
