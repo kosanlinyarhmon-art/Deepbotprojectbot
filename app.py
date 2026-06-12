@@ -158,10 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
                     "Please forward these ALL Files/Videos to your Saved Messages and start downloading there."
                 )
-                warn_msg = await context.bot.send_message(
-                    chat_id=user_id,
-                    text=warning_text
-                )
+                warn_msg = await context.bot.send_message(chat_id=user_id, text=warning_text)
 
                 async def delete_after():
                     await asyncio.sleep(300)
@@ -180,11 +177,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
                         if idx == 1:
-                            keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
+                            keyboard.append([InlineKeyboardButton("🎬 MoviesChannel 2", url=link)])
                         elif idx == 2:
                             keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
                         elif idx == 3:
-                            keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
+                            keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
                         else:
                             keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
                 if MUSIC_CHANNEL_LINK:
@@ -256,7 +253,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command ----------
+# ---------- /newpost Command (Fixed - no telegraph link in caption) ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,6 +276,7 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption_full'] = caption_text
     context.user_data['telegraph_url'] = None
 
+    # Only create Telegraph page if text is too long, but we will NOT put link in caption
     if len(caption_text) > 1024:
         await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
         try:
@@ -292,8 +290,7 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Telegraph error: {e}")
             await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
-    else:
-        pass
+    # else: no telegraph needed
 
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
@@ -322,20 +319,20 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
 
-        # Telegraph synopsis button if exists
+        # Telegraph synopsis button if exists (instead of putting link in caption)
         synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
             buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
 
-        # OTHER_CHANNELS buttons with custom names
+        # OTHER_CHANNELS buttons with custom names as requested
         if OTHER_CHANNELS:
             for idx, link in enumerate(OTHER_CHANNELS, 1):
                 if idx == 1:
-                    buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
+                    buttons.append([InlineKeyboardButton("🎬 MoviesChannel 2", url=link)])
                 elif idx == 2:
                     buttons.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
                 elif idx == 3:
-                    buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
+                    buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
                 else:
                     buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
 
@@ -353,11 +350,13 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Build photo caption (plain text, no parse_mode)
+        # Build photo caption WITHOUT the telegraph link (only preview if needed)
         if telegraph_url:
+            # Show only short preview, NO link here because button already has it
             preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}\n\n🔗 အပြည့်အစုံဖတ်ရန်: {telegraph_url}"
+            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
         else:
+            # Short enough to show full caption
             photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
         await update.message.reply_photo(
