@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
 from telegraph import Telegraph
@@ -80,6 +80,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
+MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
@@ -170,18 +171,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
-                # Channel invite buttons
+                # Build channel invite buttons
                 keyboard = []
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
                         if idx == 1:
-                            keyboard.append([InlineKeyboardButton("🎬 MoviesChannel 2", url=link)])
+                            keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
                         elif idx == 2:
                             keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
                         elif idx == 3:
-                            keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
+                            keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
                         else:
                             keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
+                if MUSIC_CHANNEL_LINK:
+                    keyboard.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
                 if keyboard:
                     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -311,7 +314,7 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
 
-        # Build buttons
+        # Buttons array
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
 
@@ -320,17 +323,21 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         if synopsis_url:
             buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
 
-        # Channel buttons
+        # OTHER_CHANNELS buttons with custom names
         if OTHER_CHANNELS:
             for idx, link in enumerate(OTHER_CHANNELS, 1):
                 if idx == 1:
-                    buttons.append([InlineKeyboardButton("🎬 MoviesChannel 2", url=link)])
+                    buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
                 elif idx == 2:
                     buttons.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
                 elif idx == 3:
-                    buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
+                    buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
                 else:
                     buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
+
+        # Optional extra music channel from env
+        if MUSIC_CHANNEL_LINK:
+            buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
         reply_markup = InlineKeyboardMarkup(buttons)
 
@@ -342,24 +349,29 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Build caption - NO telegraph link in caption
-        photo_caption = f"📝 {caption_full}" if caption_full else ""
+        # Build photo caption WITHOUT telegraph link (only preview)
+        if telegraph_url:
+            # Show only preview (first 300 chars) without link
+            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
+            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
+        else:
+            photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
-        # Send photo with buttons
+        # Send the photo with buttons
         await update.message.reply_photo(
             photo=poster,
             caption=photo_caption,
             reply_markup=reply_markup
         )
 
-        # Send deep link separately (like in Bot 2)
+        # Send deep link separately (as text)
         await update.message.reply_text(
-            f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
-            f"ဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။\n\n"
             f"**Deep Link (ဇာတ်ကားရယူရန်):**\n{deep_link}\n\n"
-            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်။"
+            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်။",
+            parse_mode="Markdown"
         )
 
+        await update.message.reply_text("✅ **Post ဖန်တီးပြီးပါပြီ။**\n\nဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
