@@ -42,7 +42,7 @@ db = mongo_client["telegram_bot"]
 file_store_collection = db["file_store"]
 users_collection = db["users"]
 stats_collection = db["stats"]
-schedules_collection = db["schedules"]  # for future schedule feature
+schedules_collection = db["schedules"]
 
 def init_stats():
     if stats_collection.count_documents({"_id": "total_requests"}) == 0:
@@ -168,7 +168,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
-                # Channel ဖိတ်ခေါ်ရန် ခလုတ်များ
                 keyboard = []
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
@@ -224,7 +223,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🤖 **Admin Menu**\n\nအောက်ပါခလုတ်များကို နှိပ်ပါ။", reply_markup=reply_markup, parse_mode="Markdown")
 
-# ---------- Menu Callback Handler ----------
+# ---------- Menu Callback ----------
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global maintenance_mode
     query = update.callback_query
@@ -241,8 +240,13 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔗 `/link` command ကို သုံးပါ။ (Video ပို့ပါက Deep Link ရမည်)")
     elif data == "menu_stats":
         total_users = users_collection.count_documents({})
-        total_requests = get_total_requests()
-        await query.edit_message_text(f"📊 **စာရင်းအင်း**\n\n👥 အသုံးပြုသူဦးရေ: {total_users}\n🎬 တောင်းဆိုမှုအရေအတွက်: {total_requests}", parse_mode="Markdown")
+        total_files = file_store_collection.count_documents({})
+        await query.edit_message_text(
+            f"📊 **စာရင်းအင်း**\n\n"
+            f"👥 အသုံးပြုသူဦးရေ: {total_users}\n"
+            f"🎬 ဖိုင်အရေအတွက်: {total_files}",
+            parse_mode="Markdown"
+        )
     elif data == "menu_broadcast":
         await query.edit_message_text("📢 `/broadcast <message>` ဖြင့် အသုံးပြုသူအားလုံးကို စာပို့နိုင်ပါသည်။")
     elif data == "menu_schedule":
@@ -292,7 +296,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command (ပုံ + စာ + Video) ----------
+# ---------- /newpost Command ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,8 +342,9 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
     video = None
     if update.message.video:
         video = update.message.video
-    elif update.message.document and update.message.document.mime_type.startswith('video/'):
+    elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith('video/'):
         video = update.message.document
+
     if not video:
         await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ (video file သို့မဟုတ် video document)။")
         return VIDEO_FILE
@@ -353,7 +358,6 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         save_file_info(payload, video.file_id, file_name)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
 
-        # ခလုတ်များ
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
         synopsis_url = context.user_data.get('telegraph_url')
@@ -405,13 +409,18 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- Admin Commands (မြန်မာလို) ----------
+# ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     total_users = users_collection.count_documents({})
-    total_requests = get_total_requests()
-    await update.message.reply_text(f"📊 **စာရင်းအင်း**\n\n👥 အသုံးပြုသူဦးရေ: {total_users}\n🎬 တောင်းဆိုမှုအရေအတွက်: {total_requests}", parse_mode="Markdown")
+    total_files = file_store_collection.count_documents({})
+    await update.message.reply_text(
+        f"📊 **စာရင်းအင်း**\n\n"
+        f"👥 အသုံးပြုသူဦးရေ: {total_users}\n"
+        f"🎬 ဖိုင်အရေအတွက်: {total_files}",
+        parse_mode="Markdown"
+    )
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -474,15 +483,28 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     maintenance_mode = False
     await update.message.reply_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
 
-# ---------- menu_command (နောက်ထပ် command) ----------
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
     await show_menu(update, context)
 
+# ---------- Set Bot Commands for Telegram Menu (short descriptions) ----------
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        ("start", "Bot ကိုစတင်ရန်"),
+        ("newpost", "ပို့စ်အသစ်ဖန်တီးရန် (ပုံ+စာ+Video)"),
+        ("link", "Video အတွက် Deep Link ထုတ်ရန်"),
+        ("stats", "စာရင်းအင်းကြည့်ရန်"),
+        ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
+        ("menu", "Admin Menu ပြသရန်"),
+        ("mute", "Maintenance mode ဖွင့်ရန်"),
+        ("unmute", "Maintenance mode ပိတ်ရန်"),
+    ])
+
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
+application.post_init = post_init
 
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
@@ -514,7 +536,7 @@ application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
-# ---------- Polling (FIXED) ----------
+# ---------- Polling ----------
 def run_bot():
     while True:
         try:
