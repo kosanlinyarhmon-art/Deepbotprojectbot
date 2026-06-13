@@ -4,7 +4,6 @@ import threading
 import logging
 import sys
 import secrets
-import json  # <-- JSON အတွက် ထည့်သွင်းထားသည်
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,7 +25,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "File Share Bot is running!"
+    return "Movie Bot is running!"
 
 @app.route('/health')
 def health():
@@ -43,7 +42,6 @@ db = mongo_client["telegram_bot"]
 file_store_collection = db["file_store"]
 users_collection = db["users"]
 stats_collection = db["stats"]
-schedules_collection = db["schedules"]
 
 def init_stats():
     if stats_collection.count_documents({"_id": "total_requests"}) == 0:
@@ -206,7 +204,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu ----------
+# ---------- Admin Menu (မြန်မာလို) ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
@@ -219,8 +217,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗑️ ဖိုင်ဖျက်ရန် (ID)", callback_data="menu_delete")],
         [InlineKeyboardButton("⚠️ ဖိုင်အားလုံးဖျက်ရန်", callback_data="menu_deleteall")],
         [InlineKeyboardButton("🔇 Maintenance mode ဖွင့်", callback_data="menu_mute")],
-        [InlineKeyboardButton("🔊 Maintenance mode ပိတ်", callback_data="menu_unmute")],
-        [InlineKeyboardButton("🔄 အဟောင်း Post များ ပြောင်းရန်", callback_data="menu_convert_old")]
+        [InlineKeyboardButton("🔊 Maintenance mode ပိတ်", callback_data="menu_unmute")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🤖 **Admin Menu**\n\nအောက်ပါခလုတ်များကို နှိပ်ပါ။", reply_markup=reply_markup, parse_mode="Markdown")
@@ -266,8 +263,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_unmute":
         maintenance_mode = False
         await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
-    elif data == "menu_convert_old":
-        await query.edit_message_text("🔄 `/convert_old` command ကို သုံးပါ။ (အဟောင်း Post များကို Deep Link ပြောင်းရန်)")
 
 # ---------- /link Command ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -415,80 +410,6 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- /convert_old Command (အဟောင်း Post များကို Deep Link ပြောင်းရန်) ----------
-async def convert_old(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
-        return
-
-    await update.message.reply_text("⏳ စတင်နေပါပြီ... JSON ဖိုင်ဖတ်နေသည်...")
-
-    if not os.path.exists('old_posts.json'):
-        await update.message.reply_text("❌ old_posts.json ဖိုင်မတွေ့ပါ။ scan_channels.py ကို အရင်ဦးစွာ run ပါ။")
-        return
-
-    with open('old_posts.json', 'r', encoding='utf-8') as f:
-        posts = json.load(f)
-
-    if not posts:
-        await update.message.reply_text("❌ JSON ဖိုင်တွင် Post မရှိပါ။")
-        return
-
-    await update.message.reply_text(f"📊 {len(posts)} ခုကို စတင်ပြောင်းလဲနေပါပြီ... (ဤအချိန်အနည်းငယ်ကြာနိုင်ပါသည်)")
-
-    success = 0
-    fail = 0
-    for idx, post in enumerate(posts, 1):
-        try:
-            file_id = post.get('file_id')
-            caption = post.get('caption', '')
-            photo_id = post.get('photo_id')
-            target_channel = post.get('channel')  # channel ID (string)
-
-            if not file_id or not target_channel:
-                fail += 1
-                continue
-
-            # Deep Link ထုတ်ပါ
-            payload = generate_payload()
-            file_name = f"movie_{post['message_id']}"
-            save_file_info(payload, file_id, file_name)
-            deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-
-            button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
-            reply_markup = InlineKeyboardMarkup([[button]])
-
-            # Post တင်ပါ
-            if photo_id:
-                await context.bot.send_photo(
-                    chat_id=target_channel,
-                    photo=photo_id,
-                    caption=caption[:1024] if caption else f"Movie #{post['message_id']}",
-                    reply_markup=reply_markup
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=target_channel,
-                    text=f"{caption}\n\n👇 ဇာတ်ကားရယူရန် အောက်ပါခလုတ်ကို နှိပ်ပါ။" if caption else f"Movie #{post['message_id']}\n\n👇 ဇာတ်ကားရယူရန် အောက်ပါခလုတ်ကို နှိပ်ပါ။",
-                    reply_markup=reply_markup
-                )
-
-            success += 1
-            if idx % 50 == 0:
-                await update.message.reply_text(f"✅ {idx}/{len(posts)} ပြီးဆုံးသည်...")
-
-            await asyncio.sleep(0.5)  # Flood control
-
-        except Exception as e:
-            logger.error(f"Error with post {post.get('message_id')}: {e}")
-            fail += 1
-
-    await update.message.reply_text(
-        f"✅ **ပြောင်းလဲခြင်း ပြီးဆုံးပါပြီ။**\n\n"
-        f"📊 အောင်မြင်သည်: {success}\n"
-        f"❌ မအောင်မြင်ပါ: {fail}"
-    )
-
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -537,7 +458,7 @@ async def cancelschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    await update.message.reply_text("🗑️ /delete <file_id> ဖြင့် ဖိုင်ဖျက်ပါ။ (ဖိုင်အိုင်ဒီထည့်ပါ)")
+    await update.message.reply_text("🗑️ /delete <file_id> ဖြင့် ဖိုင်ဖျက်ပါ။")
 
 async def deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -579,8 +500,7 @@ async def post_init(application: Application):
         ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
         ("menu", "Admin Menu ပြသရန်"),
         ("mute", "Maintenance mode ဖွင့်ရန်"),
-        ("unmute", "Maintenance mode ပိတ်ရန်"),
-        ("convert_old", "အဟောင်း Post များကို Deep Link ပြောင်းရန်")
+        ("unmute", "Maintenance mode ပိတ်ရန်")
     ])
 
 # ---------- Application ----------
@@ -615,7 +535,6 @@ application.add_handler(CommandHandler("deleteall", deleteall))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
-application.add_handler(CommandHandler("convert_old", convert_old))   # <-- ထည့်သွင်းထားသည်
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
 # ---------- Polling ----------
