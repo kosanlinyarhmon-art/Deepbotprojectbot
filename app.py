@@ -205,7 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu (မြန်မာလို) ----------
+# ---------- Admin Menu ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
@@ -223,7 +223,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🤖 **Admin Menu**\n\nအောက်ပါခလုတ်များကို နှိပ်ပါ။", reply_markup=reply_markup, parse_mode="Markdown")
 
-# ---------- Menu Callback ----------
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global maintenance_mode
     query = update.callback_query
@@ -266,7 +265,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_mode = False
         await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
 
-# ---------- /link Command ----------
+# ---------- /link Command (ပြင်ဆင်ပြီး) ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
@@ -285,9 +284,11 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 file_name = video.file_name or "ဇာတ်ကား"
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+                # ပြင်ဆင်ထားသော Message ပုံစံ
                 await update.message.reply_text(
-                    f"🔗 သင်၏ Deep Link\n\n{deep_link}\n\n"
-                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် {file_name} ကို ချက်ချင်းရရှိမည်။\n"
+                    f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
+                    f"{deep_link}\n\n"
+                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
                     f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
                 )
             except Exception as e:
@@ -393,9 +394,13 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
+        
+        # ပြင်ဆင်ထားသော Deep Link Message ပုံစံ (newpost အတွက်)
         await update.message.reply_text(
-            f"**Deep Link (ဇာတ်ကားရယူရန်):**\n{deep_link}\n\n"
-            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်။"
+            f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
+            f"{deep_link}\n\n"
+            f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
+            f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
         )
         await update.message.reply_text("✅ **Post ဖန်တီးပြီးပါပြီ။**\n\nဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
         context.user_data.clear()
@@ -489,7 +494,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_menu(update, context)
 
-# ---------- Set Bot Commands for Telegram Menu (short descriptions) ----------
+# ---------- Set Bot Commands for Telegram Menu ----------
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
