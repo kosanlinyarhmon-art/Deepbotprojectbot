@@ -171,7 +171,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_user(user_id)
                 increment_requests()
 
-                # Build channel invite buttons
                 keyboard = []
                 if OTHER_CHANNELS:
                     for idx, link in enumerate(OTHER_CHANNELS, 1):
@@ -200,17 +199,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
     else:
         if is_admin(user_id):
-            await update.message.reply_text(
-                "🎬 **မင်္ဂလာပါ Admin**\n\n"
-                "အောက်ပါ Command များကို သုံးနိုင်ပါသည်။\n\n"
-                "/newpost - 🆕 ပို့စ်အသစ်ဖန်တီးရန် (ပုံ + စာ + Video)\n"
-                "/link - 🔗 Video ပို့ပါက Deep Link ထုတ်ပေးမည်\n"
-                "/stats - 📊 စာရင်းအင်းကြည့်ရန်\n"
-                "/broadcast - 📢 အသုံးပြုသူအားလုံးကို စာပို့ရန်\n"
-                "/mute - 🔇 Maintenance mode ဖွင့်ရန်\n"
-                "/unmute - 🔊 Maintenance mode ပိတ်ရန်",
-                parse_mode="Markdown"
-            )
+            await show_menu(update, context)
         else:
             await update.message.reply_text(
                 "🎬 **မင်္ဂလာပါ**\n\n"
@@ -219,38 +208,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- /link Command ----------
-async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+# ---------- Admin Menu (မြန်မာလို) ----------
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
+        [InlineKeyboardButton("🔗 ဗီဒီယို → Deep Link", callback_data="menu_link")],
+        [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="menu_stats")],
+        [InlineKeyboardButton("📢 ပြန်လွှင့်ရန်", callback_data="menu_broadcast")],
+        [InlineKeyboardButton("🚫 ပိတ်ထားသူစာရင်း", callback_data="menu_blocklist")],
+        [InlineKeyboardButton("🔇 Maintenance mode ဖွင့်ရန်", callback_data="menu_mute")],
+        [InlineKeyboardButton("🔊 Maintenance mode ပိတ်ရန်", callback_data="menu_unmute")],
+        [InlineKeyboardButton("⏰ အချိန်ဇယား", callback_data="menu_schedule")],
+        [InlineKeyboardButton("📋 အချိန်ဇယားစာရင်း", callback_data="menu_listschedule")],
+        [InlineKeyboardButton("❌ အချိန်ဇယားဖျက်ရန်", callback_data="menu_cancelschedule")],
+        [InlineKeyboardButton("🗑️ ဖိုင်ဖျက်ရန်", callback_data="menu_delete")],
+        [InlineKeyboardButton("⚠️ အားလုံးဖျက်ရန်", callback_data="menu_deleteall")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "🤖 **Admin Menu**\n\nအောက်ပါခလုတ်များကို နှိပ်ပါ။",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global maintenance_mode
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
-    context.user_data['waiting_for_video_link'] = True
 
-async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    if context.user_data.get('waiting_for_video_link'):
-        video = update.message.video
-        if video:
-            try:
-                payload = generate_payload()
-                file_name = video.file_name or "ဇာတ်ကား"
-                save_file_info(payload, video.file_id, file_name)
-                deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-
-                await update.message.reply_text(
-                    f"🔗 သင်၏ Deep Link\n\n"
-                    f"{deep_link}\n\n"
-                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် {file_name} ကို ချက်ချင်းရရှိမည်။\n"
-                    f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
-                )
-            except Exception as e:
-                await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
-            context.user_data.pop('waiting_for_video_link', None)
-        else:
-            await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
+    data = query.data
+    if data == "menu_newpost":
+        await query.edit_message_text("📸 `/newpost` command ကို သုံးပါ။ (ပုံ+စာ+ဗီဒီယို)")
+    elif data == "menu_link":
+        await query.edit_message_text("🔗 `/link` command ကို သုံးပါ။ (ဗီဒီယိုပို့ရင် Deep Link ရမည်)")
+    elif data == "menu_stats":
+        total_users = users_collection.count_documents({})
+        total_requests = get_total_requests()
+        await query.edit_message_text(f"📊 **စာရင်းအင်း**\n\n👥 အသုံးပြုသူဦးရေ: {total_users}\n🎬 တောင်းဆိုမှုအရေအတွက်: {total_requests}", parse_mode="Markdown")
+    elif data == "menu_broadcast":
+        await query.edit_message_text("📢 `/broadcast <message>` ဖြင့် အသုံးပြုသူအားလုံးကို စာပို့နိုင်ပါသည်။")
+    elif data == "menu_blocklist":
+        # Note: This blocklist feature may not be fully implemented in Bot1; placeholder
+        await query.edit_message_text("🚫 ဤအင်္ဂါရပ်ကို ထည့်သွင်းရန် လိုအပ်သေးသည်။")
+    elif data == "menu_mute":
+        maintenance_mode = True
+        await query.edit_message_text("🔇 Maintenance mode ဖွင့်ထားပါသည်။")
+    elif data == "menu_unmute":
+        maintenance_mode = False
+        await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
+    elif data == "menu_schedule":
+        await query.edit_message_text("⏰ `/schedule` command ကို သုံးပါ။ (အချိန်ဇယားဆွဲရန်)")
+    elif data == "menu_listschedule":
+        await query.edit_message_text("📋 `/listschedule` command ကို သုံးပါ။ (အချိန်ဇယားစာရင်းကြည့်ရန်)")
+    elif data == "menu_cancelschedule":
+        await query.edit_message_text("❌ `/cancelschedule <id>` command ကို သုံးပါ။ (အချိန်ဇယားဖျက်ရန်)")
+    elif data == "menu_delete":
+        await query.edit_message_text("🗑️ `/delete <file_id>` command ကို သုံးပါ။ (ဖိုင်ဖျက်ရန်)")
+    elif data == "menu_deleteall":
+        await query.edit_message_text("⚠️ `/deleteall` command ကို သုံးပါ။ (အားလုံးဖျက်ရန်)")
 
 # ---------- /newpost Command ----------
 POSTER, CAPTION, VIDEO_FILE = range(3)
@@ -317,13 +336,9 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
         # Buttons array
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
-
-        # Telegraph synopsis button if exists
         synopsis_url = context.user_data.get('telegraph_url')
         if synopsis_url:
             buttons.append([InlineKeyboardButton("📖 ဇာတ်ညွှန်းအပြည့်အစုံ ဖတ်ရန်", url=synopsis_url)])
-
-        # OTHER_CHANNELS buttons with custom names
         if OTHER_CHANNELS:
             for idx, link in enumerate(OTHER_CHANNELS, 1):
                 if idx == 1:
@@ -334,8 +349,6 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
                     buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်း ချန်နယ်", url=link)])
                 else:
                     buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
-
-        # Optional extra music channel from env
         if MUSIC_CHANNEL_LINK:
             buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
 
@@ -349,25 +362,21 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
             return ConversationHandler.END
 
-        # Build photo caption WITHOUT telegraph link (only preview)
         if telegraph_url:
-            # Show only preview (first 300 chars) without link
             preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
             photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
         else:
             photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
-        # Send the photo with buttons
         await update.message.reply_photo(
             photo=poster,
             caption=photo_caption,
             reply_markup=reply_markup
         )
 
-        # FIX: Remove parse_mode="Markdown" to avoid entity parsing error
         await update.message.reply_text(
             f"**Deep Link (ဇာတ်ကားရယူရန်):**\n{deep_link}\n\n"
-            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်。"
+            f"ဤလင့်ကို ကူးယူ၍လည်း အသုံးပြုနိုင်ပါသည်။"
         )
 
         await update.message.reply_text("✅ **Post ဖန်တီးပြီးပါပြီ။**\n\nဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
@@ -381,6 +390,39 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
     context.user_data.clear()
     return ConversationHandler.END
+
+# ---------- /link Command ----------
+async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
+    context.user_data['waiting_for_video_link'] = True
+
+async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    if context.user_data.get('waiting_for_video_link'):
+        video = update.message.video
+        if video:
+            try:
+                payload = generate_payload()
+                file_name = video.file_name or "ဇာတ်ကား"
+                save_file_info(payload, video.file_id, file_name)
+                deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+
+                await update.message.reply_text(
+                    f"🔗 သင်၏ Deep Link\n\n"
+                    f"{deep_link}\n\n"
+                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် {file_name} ကို ချက်ချင်းရရှိမည်။\n"
+                    f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
+            context.user_data.pop('waiting_for_video_link', None)
+        else:
+            await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
 # ---------- Other Admin Commands ----------
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -471,6 +513,8 @@ application.add_handler(CommandHandler("listschedule", listschedule))
 application.add_handler(CommandHandler("cancelschedule", cancelschedule))
 application.add_handler(CommandHandler("delete", delete_file))
 application.add_handler(CommandHandler("deleteall", deleteall))
+application.add_handler(CommandHandler("menu", menu_command))
+application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
 # ---------- Polling ----------
 def run_bot():
