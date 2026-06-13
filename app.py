@@ -4,6 +4,7 @@ import threading
 import logging
 import sys
 import secrets
+import json  # <-- JSON အတွက် ထည့်သွင်းထားသည်
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,7 +26,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Movie Bot is running!"
+    return "File Share Bot is running!"
 
 @app.route('/health')
 def health():
@@ -218,7 +219,8 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗑️ ဖိုင်ဖျက်ရန် (ID)", callback_data="menu_delete")],
         [InlineKeyboardButton("⚠️ ဖိုင်အားလုံးဖျက်ရန်", callback_data="menu_deleteall")],
         [InlineKeyboardButton("🔇 Maintenance mode ဖွင့်", callback_data="menu_mute")],
-        [InlineKeyboardButton("🔊 Maintenance mode ပိတ်", callback_data="menu_unmute")]
+        [InlineKeyboardButton("🔊 Maintenance mode ပိတ်", callback_data="menu_unmute")],
+        [InlineKeyboardButton("🔄 အဟောင်း Post များ ပြောင်းရန်", callback_data="menu_convert_old")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🤖 **Admin Menu**\n\nအောက်ပါခလုတ်များကို နှိပ်ပါ။", reply_markup=reply_markup, parse_mode="Markdown")
@@ -264,8 +266,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_unmute":
         maintenance_mode = False
         await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
+    elif data == "menu_convert_old":
+        await query.edit_message_text("🔄 `/convert_old` command ကို သုံးပါ။ (အဟောင်း Post များကို Deep Link ပြောင်းရန်)")
 
-# ---------- /link Command (ပြင်ဆင်ပြီး) ----------
+# ---------- /link Command ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
@@ -284,7 +288,6 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 file_name = video.file_name or "ဇာတ်ကား"
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
-                # ပြင်ဆင်ထားသော Message ပုံစံ
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
                     f"{deep_link}\n\n"
@@ -343,7 +346,7 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
     video = None
     if update.message.video:
         video = update.message.video
-    elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith('video/'):
+    elif update.message.document and update.message.document.mime_type.startswith('video/'):
         video = update.message.document
 
     if not video:
@@ -394,8 +397,6 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
 
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
-        
-        # ပြင်ဆင်ထားသော Deep Link Message ပုံစံ (newpost အတွက်)
         await update.message.reply_text(
             f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
             f"{deep_link}\n\n"
@@ -413,6 +414,80 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
     context.user_data.clear()
     return ConversationHandler.END
+
+# ---------- /convert_old Command (အဟောင်း Post များကို Deep Link ပြောင်းရန်) ----------
+async def convert_old(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+
+    await update.message.reply_text("⏳ စတင်နေပါပြီ... JSON ဖိုင်ဖတ်နေသည်...")
+
+    if not os.path.exists('old_posts.json'):
+        await update.message.reply_text("❌ old_posts.json ဖိုင်မတွေ့ပါ။ scan_channels.py ကို အရင်ဦးစွာ run ပါ။")
+        return
+
+    with open('old_posts.json', 'r', encoding='utf-8') as f:
+        posts = json.load(f)
+
+    if not posts:
+        await update.message.reply_text("❌ JSON ဖိုင်တွင် Post မရှိပါ။")
+        return
+
+    await update.message.reply_text(f"📊 {len(posts)} ခုကို စတင်ပြောင်းလဲနေပါပြီ... (ဤအချိန်အနည်းငယ်ကြာနိုင်ပါသည်)")
+
+    success = 0
+    fail = 0
+    for idx, post in enumerate(posts, 1):
+        try:
+            file_id = post.get('file_id')
+            caption = post.get('caption', '')
+            photo_id = post.get('photo_id')
+            target_channel = post.get('channel')  # channel ID (string)
+
+            if not file_id or not target_channel:
+                fail += 1
+                continue
+
+            # Deep Link ထုတ်ပါ
+            payload = generate_payload()
+            file_name = f"movie_{post['message_id']}"
+            save_file_info(payload, file_id, file_name)
+            deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+
+            button = InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)
+            reply_markup = InlineKeyboardMarkup([[button]])
+
+            # Post တင်ပါ
+            if photo_id:
+                await context.bot.send_photo(
+                    chat_id=target_channel,
+                    photo=photo_id,
+                    caption=caption[:1024] if caption else f"Movie #{post['message_id']}",
+                    reply_markup=reply_markup
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=target_channel,
+                    text=f"{caption}\n\n👇 ဇာတ်ကားရယူရန် အောက်ပါခလုတ်ကို နှိပ်ပါ။" if caption else f"Movie #{post['message_id']}\n\n👇 ဇာတ်ကားရယူရန် အောက်ပါခလုတ်ကို နှိပ်ပါ။",
+                    reply_markup=reply_markup
+                )
+
+            success += 1
+            if idx % 50 == 0:
+                await update.message.reply_text(f"✅ {idx}/{len(posts)} ပြီးဆုံးသည်...")
+
+            await asyncio.sleep(0.5)  # Flood control
+
+        except Exception as e:
+            logger.error(f"Error with post {post.get('message_id')}: {e}")
+            fail += 1
+
+    await update.message.reply_text(
+        f"✅ **ပြောင်းလဲခြင်း ပြီးဆုံးပါပြီ။**\n\n"
+        f"📊 အောင်မြင်သည်: {success}\n"
+        f"❌ မအောင်မြင်ပါ: {fail}"
+    )
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -505,6 +580,7 @@ async def post_init(application: Application):
         ("menu", "Admin Menu ပြသရန်"),
         ("mute", "Maintenance mode ဖွင့်ရန်"),
         ("unmute", "Maintenance mode ပိတ်ရန်"),
+        ("convert_old", "အဟောင်း Post များကို Deep Link ပြောင်းရန်")
     ])
 
 # ---------- Application ----------
@@ -539,6 +615,7 @@ application.add_handler(CommandHandler("deleteall", deleteall))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
+application.add_handler(CommandHandler("convert_old", convert_old))   # <-- ထည့်သွင်းထားသည်
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
 # ---------- Polling ----------
