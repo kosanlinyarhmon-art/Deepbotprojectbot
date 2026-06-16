@@ -491,7 +491,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context)
 
 # ---------- Set Bot Commands for Telegram Menu ----------
-async def post_init(application: Application):
+async def set_commands(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
         ("newpost", "ပို့စ်အသစ်ဖန်တီးရန် (ပုံ+စာ+Video)"),
@@ -505,7 +505,6 @@ async def post_init(application: Application):
 
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
-application.post_init = post_init
 
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
@@ -543,6 +542,8 @@ def run_bot():
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            # Set commands before starting polling
+            loop.run_until_complete(set_commands(application))
             logger.info("Starting bot polling...")
             application.run_polling()
         except Exception as e:
