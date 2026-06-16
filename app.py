@@ -540,9 +540,9 @@ application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 def run_bot():
     while True:
         try:
+            # Run set_commands and polling in the same event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            # Set commands before starting polling
             loop.run_until_complete(set_commands(application))
             logger.info("Starting bot polling...")
             application.run_polling()
