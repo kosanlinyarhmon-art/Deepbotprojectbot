@@ -386,10 +386,12 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             return ConversationHandler.END
 
         if telegraph_url:
-            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
-        else:
-            photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{caption_full}"
+    preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
+    photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
+else:
+    # Telegraph မရှိရင် caption_full ကို 1000 လုံးအထိပဲ ဖြတ်ပြီးသုံးပါ
+    truncated = caption_full[:1000] + "..." if len(caption_full) > 1000 else caption_full
+    photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{truncated}"
 
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
         await update.message.reply_text(
