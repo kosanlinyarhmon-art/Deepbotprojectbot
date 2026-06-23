@@ -318,19 +318,17 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption_full'] = caption_text
     context.user_data['telegraph_url'] = None
 
-    if len(caption_text) > 1024:
-        await update.message.reply_text("⏳ စာသားရှည်နေပါသည်။ Telegraph စာမျက်နှာ ဖန်တီးနေပါပြီ...")
-        try:
-            title = f"Movie Synopsis - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            page_url = await create_telegraph_page(title, caption_text)
-            if page_url:
-                context.user_data['telegraph_url'] = page_url
-                await update.message.reply_text(f"✅ Telegraph စာမျက်နှာ ဖန်တီးပြီးပါပြီ။\n\nဇာတ်ညွှန်းအပြည့်အစုံကို ဤလင့်တွင် ဖတ်ရှုနိုင်ပါသည်။\n{page_url}")
-            else:
-                await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။ စာသားကို ဆက်လက်အသုံးပြုပါမည်။")
-        except Exception as e:
-            logger.error(f"Telegraph error: {e}")
-            await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
+   if len(caption_text) > 1024:
+    try:
+        page_url = await create_telegraph_page(title, caption_text)
+        if page_url:
+            context.user_data['telegraph_url'] = page_url
+            await update.message.reply_text(f"✅ Telegraph စာမျက်နှာ ဖန်တီးပြီးပါပြီ။\n\nဇာတ်ညွှန်းအပြည့်အစုံကို ဤလင့်တွင် ဖတ်ရှုနိုင်ပါသည်။\n{page_url}")
+        else:
+            await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။ စာသားကို ဆက်လက်အသုံးပြုပါမည်။")
+    except Exception as e:
+        logger.error(f"Telegraph error: {e}")
+        await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
     else:
         pass
 
