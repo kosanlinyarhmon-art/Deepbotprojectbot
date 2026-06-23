@@ -318,19 +318,18 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['caption_full'] = caption_text
     context.user_data['telegraph_url'] = None
 
-   if len(caption_text) > 1024:
-    try:
-        page_url = await create_telegraph_page(title, caption_text)
-        if page_url:
-            context.user_data['telegraph_url'] = page_url
-            await update.message.reply_text(f"✅ Telegraph စာမျက်နှာ ဖန်တီးပြီးပါပြီ။\n\nဇာတ်ညွှန်းအပြည့်အစုံကို ဤလင့်တွင် ဖတ်ရှုနိုင်ပါသည်။\n{page_url}")
-        else:
-            await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။ စာသားကို ဆက်လက်အသုံးပြုပါမည်။")
-    except Exception as e:
-        logger.error(f"Telegraph error: {e}")
-        await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
-    else:
-        pass
+    if len(caption_text) > 1024:
+        title = f"Movie Synopsis - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        try:
+            page_url = await create_telegraph_page(title, caption_text)
+            if page_url:
+                context.user_data['telegraph_url'] = page_url
+                await update.message.reply_text(f"✅ Telegraph စာမျက်နှာ ဖန်တီးပြီးပါပြီ။\n\nဇာတ်ညွှန်းအပြည့်အစုံကို ဤလင့်တွင် ဖတ်ရှုနိုင်ပါသည်။\n{page_url}")
+            else:
+                await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။ စာသားကို ဆက်လက်အသုံးပြုပါမည်။")
+        except Exception as e:
+            logger.error(f"Telegraph error: {e}")
+            await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
 
     await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
     return VIDEO_FILE
@@ -384,12 +383,12 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             return ConversationHandler.END
 
         if telegraph_url:
-    preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-    photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
-else:
-    # Telegraph မရှိရင် caption_full ကို 1000 လုံးအထိပဲ ဖြတ်ပြီးသုံးပါ
-    truncated = caption_full[:1000] + "..." if len(caption_full) > 1000 else caption_full
-    photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{truncated}"
+            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
+            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
+        else:
+            # Telegraph မရှိရင် caption_full ကို 1000 လုံးအထိပဲ ဖြတ်ပြီးသုံးပါ
+            truncated = caption_full[:1000] + "..." if len(caption_full) > 1000 else caption_full
+            photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{truncated}"
 
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
         await update.message.reply_text(
