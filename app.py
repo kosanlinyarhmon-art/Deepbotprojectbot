@@ -295,8 +295,8 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command ----------
-POSTER, CAPTION, VIDEO_FILE = range(3)
+# ---------- /newpost Command (ပြင်ဆင်ပြီး) ----------
+POSTER, CAPTION, VIDEO_FILE, WAITING_VIDEO = range(4)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -331,10 +331,19 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Telegraph error: {e}")
             await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
 
-    await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
+    await update.message.reply_text("📝 ဇာတ်ညွှန်းပြီးပါပြီ။ Video ပို့ရန် 'a' ကိုနှိပ်ပါ...")
     return VIDEO_FILE
 
-async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_a_for_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text.lower() == 'a':
+        await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
+        return WAITING_VIDEO
+    else:
+        await update.message.reply_text("⚠️ ကျေးဇူးပြု၍ 'a' ကိုသာ ရိုက်ပါ။")
+        return VIDEO_FILE
+
+async def receive_video_after_a(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video = None
     if update.message.video:
         video = update.message.video
@@ -343,7 +352,7 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
 
     if not video:
         await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ (video file သို့မဟုတ် video document)။")
-        return VIDEO_FILE
+        return WAITING_VIDEO
 
     try:
         file_name = getattr(video, 'file_name', None)
@@ -386,7 +395,6 @@ async def receive_video_for_post(update: Update, context: ContextTypes.DEFAULT_T
             preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
             photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
         else:
-            # Telegraph မရှိရင် caption_full ကို 1000 လုံးအထိပဲ ဖြတ်ပြီးသုံးပါ
             truncated = caption_full[:1000] + "..." if len(caption_full) > 1000 else caption_full
             photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{truncated}"
 
@@ -510,9 +518,10 @@ newpost_handler = ConversationHandler(
     states={
         POSTER: [MessageHandler(filters.PHOTO, receive_poster)],
         CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption)],
-        VIDEO_FILE: [
-            MessageHandler(filters.VIDEO, receive_video_for_post),
-            MessageHandler(filters.Document.ALL, receive_video_for_post)
+        VIDEO_FILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_a_for_video)],
+        WAITING_VIDEO: [
+            MessageHandler(filters.VIDEO, receive_video_after_a),
+            MessageHandler(filters.Document.ALL, receive_video_after_a)
         ],
     },
     fallbacks=[CommandHandler('cancel', cancel_newpost)],
@@ -539,7 +548,6 @@ application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 def run_bot():
     while True:
         try:
-            # Run set_commands and polling in the same event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(set_commands(application))
