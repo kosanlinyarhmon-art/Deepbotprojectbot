@@ -113,7 +113,7 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
             telegraph.create_page,
             title=title,
             html_content=f"<p>{html_content}</p>",
-            author_name="Movie Bot"
+            author_name="WZN Cinema Hub Movies"
         )
         return response['url']
     except Exception as e:
