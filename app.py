@@ -78,20 +78,32 @@ def get_file_info(payload):
     return None
 
 # ---------- Special Link Helpers ----------
-def save_batch_messages(batch_id, messages):
+def save_special_link(special_id, messages, whitelisters=None, whitelist_enabled=False, protect_content=False, auto_expire=None):
+    if whitelisters is None:
+        whitelisters = []
     batch_collection.update_one(
-        {"batch_id": batch_id},
-        {"$set": {"messages": messages, "created_at": datetime.now()}},
+        {"batch_id": f"special_{special_id}"},
+        {"$set": {
+            "messages": messages,
+            "whitelisters": whitelisters,
+            "whitelist_enabled": whitelist_enabled,
+            "protect_content": protect_content,
+            "auto_expire": auto_expire,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now()
+        }},
         upsert=True
     )
 
-def get_batch_messages(batch_id):
-    doc = batch_collection.find_one({"batch_id": batch_id})
-    return doc["messages"] if doc else None
-
-def get_special_link_data(batch_id):
-    doc = batch_collection.find_one({"batch_id": batch_id})
+def get_special_link(special_id):
+    doc = batch_collection.find_one({"batch_id": f"special_{special_id}"})
     return doc if doc else None
+
+def get_all_special_links():
+    return list(batch_collection.find({"batch_id": {"$regex": "^special_"}}))
+
+def delete_special_link(special_id):
+    batch_collection.delete_one({"batch_id": f"special_{special_id}"})
 
 # ---------- Telegram Configuration ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -138,7 +150,7 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         logger.error(f"Telegraph error: {e}")
         return None
 
-# ---------- Start & Deep Link Handler (UPDATED with Special Link) ----------
+# ---------- Start & Deep Link Handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -147,7 +159,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ---------- Check for Special Link ----------
         if payload.startswith('special_'):
-            doc = get_special_link_data(payload)
+            special_id = payload.replace('special_', '')
+            doc = get_special_link(special_id)
+            
             if not doc:
                 await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
                 return
@@ -155,13 +169,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Check Auto Expire
             expire_time = doc.get('auto_expire')
             if expire_time:
-                try:
-                    expire_dt = datetime.fromisoformat(expire_time)
-                    if datetime.now() > expire_dt:
-                        await update.message.reply_text("❌ ဤ Link သည် သက်တမ်းကုန်သွားပါပြီ။")
-                        return
-                except:
-                    pass
+                expire_dt = datetime.fromisoformat(expire_time)
+                if datetime.now() > expire_dt:
+                    await update.message.reply_text("❌ ဤ Link သည် သက်တမ်းကုန်သွားပါပြီ။")
+                    return
             
             # Check Whitelisters
             if doc.get('whitelist_enabled', False):
@@ -170,7 +181,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ သင်သည် ဤ Link ကို ကြည့်ရှုခွင့် မရှိပါ။")
                     return
             
-            # Check Channel Membership
+            # Check Channel membership
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 Channel သို့ဝင်ရန်: {INVITE_LINK}",
@@ -182,10 +193,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             increment_requests()
             
             messages = doc.get('messages', [])
-            if not messages:
-                await update.message.reply_text("❌ ဤ Link တွင် မက်ဆေ့ချ် မရှိပါ။")
-                return
-            
             await update.message.reply_text(f"📦 စုစည်းထားသော အကြောင်းအရာ {len(messages)} ခုကို ပို့ပေးနေပါပြီ...")
             
             for msg in messages:
@@ -205,7 +212,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         await context.bot.send_message(chat_id=user_id, text=msg.get('text', 'Unknown message type'))
                 except Exception as e:
-                    logger.error(f"Error sending special link item: {e}")
+                    logger.error(f"Error sending special item: {e}")
             
             # Send channel buttons
             keyboard = []
@@ -311,17 +318,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu (မြန်မာလို) WITH Special Link ----------
+# ---------- Admin Menu ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
         [InlineKeyboardButton("🔗 Video → Deep Link", callback_data="menu_link")],
+        [InlineKeyboardButton("📦 Batch ပြုလုပ်ရန်", callback_data="menu_batch")],
+        [InlineKeyboardButton("📦 Custom Batch", callback_data="menu_custom_batch")],
+        [InlineKeyboardButton("🔗 Special Link", callback_data="menu_special_link")],
         [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="menu_stats")],
         [InlineKeyboardButton("📢 ပြန်လွှင့်ခြင်း", callback_data="menu_broadcast")],
         [InlineKeyboardButton("⏰ Schedule ပြုလုပ်ရန်", callback_data="menu_schedule")],
         [InlineKeyboardButton("📋 Schedule စာရင်း", callback_data="menu_listschedule")],
         [InlineKeyboardButton("❌ Schedule ဖျက်ရန်", callback_data="menu_cancelschedule")],
-        [InlineKeyboardButton("🔗 Special Link", callback_data="menu_special_link")],
         [InlineKeyboardButton("🗑️ ဖိုင်ဖျက်ရန် (ID)", callback_data="menu_delete")],
         [InlineKeyboardButton("⚠️ ဖိုင်အားလုံးဖျက်ရန်", callback_data="menu_deleteall")],
         [InlineKeyboardButton("🔇 Maintenance mode ဖွင့်", callback_data="menu_mute")],
@@ -344,6 +353,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📸 `/newpost` command ကို သုံးပါ။ (Post ဖန်တီးရန်)")
     elif data == "menu_link":
         await query.edit_message_text("🔗 `/link` command ကို သုံးပါ။ (Video ပို့ပါက Deep Link ရမည်)")
+    elif data == "menu_batch":
+        await query.edit_message_text("📦 `/batch` command ကို သုံးပါ။\n\nChannel ထဲက ပထမဆုံး မက်ဆေ့ချ်ကို Forward လုပ်ပြီး နောက်ဆက်တွဲများကို စုစည်းပါ။")
+    elif data == "menu_custom_batch":
+        await query.edit_message_text("📦 `/custom_batch` command ကို သုံးပါ။\n\nဖိုင်များကို တစ်ခုချင်းစီ ပို့ပြီး GENERATE LINK နှိပ်ပါ။")
     elif data == "menu_special_link":
         await query.edit_message_text("🔗 `/special_link` command ကို သုံးပါ။\n\nSpecial Link အသစ်ပြုလုပ်ရန်၊ ပြင်ဆင်ရန်၊ ဖျက်ရန်။")
     elif data == "menu_stats":
@@ -420,7 +433,7 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    context.user_data['caption_parts'] = []  # caption part တွေ သိမ်းဖို့
+    context.user_data['caption_parts'] = []
     await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား (ဇာတ်ညွှန်း) ရေးပေးပါ...\n(စာသားရှည်ပါက ၂ ခါခွဲပို့နိုင်ပါသည်။ ပြီးပါက 'a' ရိုက်ပါ။)")
     return CAPTION
 
@@ -532,71 +545,46 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # =====================================================
-# 🆕 /special_link - Tutorial အတိုင်း အပြည့်အစုံ
+# 🆕 /special_link - Tutorial အတိုင်း (ပုံထဲကအတိုင်း)
 # =====================================================
-SPECIAL_MAIN, SPECIAL_CREATE, SPECIAL_COLLECT, SPECIAL_MODIFY, SPECIAL_MODIFY_SELECT, SPECIAL_EDIT_CONTENT, SPECIAL_EDIT_ADD, SPECIAL_EDIT_ADD_POSITION, SPECIAL_EDIT_REMOVE, SPECIAL_WHITELISTER, SPECIAL_WHITELISTER_ADD, SPECIAL_WHITELISTER_REMOVE, SPECIAL_PROTECT, SPECIAL_EXPIRE, SPECIAL_EXPIRE_SET = range(400, 415)
+SPECIAL_COLLECT = 100
 
-# ---------- MAIN MENU ----------
 async def special_link_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
         return ConversationHandler.END
     
+    context.user_data['special_messages'] = []
+    context.user_data['special_link_id'] = generate_payload()
+    context.user_data['special_paused'] = False
+    
     keyboard = [
-        [InlineKeyboardButton("➕ Create", callback_data="special_create")],
-        [InlineKeyboardButton("✏️ Modify", callback_data="special_modify")],
-        [InlineKeyboardButton("📝 Edit Content", callback_data="special_edit")],
-        [InlineKeyboardButton("👥 Whitelisters", callback_data="special_whitelister")],
-        [InlineKeyboardButton("🛡️ Protect Content", callback_data="special_protect")],
-        [InlineKeyboardButton("⏰ Auto Expire", callback_data="special_expire")],
-        [InlineKeyboardButton("❌ Close", callback_data="special_close")]
+        [InlineKeyboardButton("⏸️ PAUSE", callback_data="special_pause")],
+        [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="special_generate")],
+        [InlineKeyboardButton("❌ CANCEL", callback_data="special_cancel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🔗 **Special Link Management**\n\n"
-        "အောက်ပါခလုတ်များမှ လုပ်ဆောင်ချက်ကို ရွေးပါ။\n\n"
-        "To know more click [here](https://mdbotz-tutorial.github.io/)",
-        reply_markup=reply_markup,
-        parse_mode="Markdown",
-        disable_web_page_preview=True
-    )
-    return SPECIAL_MAIN
-
-# ---------- SPECIAL: CREATE ----------
-async def special_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
-        return ConversationHandler.END
-    
-    context.user_data['special_messages'] = []
-    context.user_data['special_link_id'] = generate_payload()
-    context.user_data['special_state'] = 'creating'
-    
-    keyboard = [[InlineKeyboardButton("🔗 Generate Link", callback_data="special_generate")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "📝 **Create Special Link**\n\n"
+        "🔗 **Send me the message you want to store**\n\n"
         "သိမ်းဆည်းလိုသော မက်ဆေ့ချ်ကို ပို့ပါ။\n"
-        "➡️ စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ Document အားလုံး လက်ခံပါသည်။\n\n"
-        "နောက်ထပ် မက်ဆေ့ချ်များ ထပ်သိမ်းလိုပါက တစ်ခုချင်းစီကို ဆက်လက်ပို့ပါ။\n\n"
-        "မက်ဆေ့ချ်အားလုံး ထည့်ပြီးပါက 'Generate Link' ခလုတ်ကို နှိပ်ပါ။",
+        "(စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ Document အားလုံး လက်ခံပါသည်)\n\n"
+        "မက်ဆေ့ချ်အားလုံး ပို့ပြီးပါက 'GENERATE LINK' ခလုတ်ကို နှိပ်ပါ။",
         reply_markup=reply_markup
     )
     return SPECIAL_COLLECT
 
 async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('special_state') != 'creating':
-        return
-    
     if not is_admin(update.effective_user.id):
         return
     
+    # PAUSE ဖြစ်နေရင် မလက်ခံပါ
+    if context.user_data.get('special_paused', False):
+        await update.message.reply_text("⏸️ လက်ရှိ Pause ထားပါသည်။ ဆက်လက်လက်ခံရန် 'RESUME' ကိုနှိပ်ပါ။")
+        return SPECIAL_COLLECT
+    
     msg_data = None
+    
     if update.message.text:
         msg_data = {"type": "text", "text": update.message.text}
     elif update.message.video:
@@ -609,6 +597,8 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
         msg_data = {"type": "audio", "file_id": update.message.audio.file_id, "caption": update.message.caption or "Audio"}
     elif update.message.voice:
         msg_data = {"type": "voice", "file_id": update.message.voice.file_id, "caption": "Voice"}
+    elif update.message.animation:
+        msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
     else:
         await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
         return SPECIAL_COLLECT
@@ -617,19 +607,74 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
         context.user_data['special_messages'].append(msg_data)
         count = len(context.user_data['special_messages'])
         
-        keyboard = [[InlineKeyboardButton("🔗 Generate Link", callback_data="special_generate")]]
+        # သိမ်းလိုက်တဲ့ ဖိုင်ကို ပြသမယ်
+        type_names = {
+            'text': '📝 စာသား',
+            'video': '🎬 ဗီဒီယို',
+            'photo': '🖼️ ဓာတ်ပုံ',
+            'document': '📄 Document',
+            'audio': '🎵 အသံ',
+            'voice': '🎤 အသံမှတ်',
+            'animation': '🎞️ GIF'
+        }
+        type_name = type_names.get(msg_data['type'], msg_data['type'])
+        
+        if msg_data['type'] == 'text':
+            preview = msg_data['text'][:100] + "..." if len(msg_data['text']) > 100 else msg_data['text']
+            stored_msg = f"📝 {preview}"
+        else:
+            stored_msg = f"{type_name}: {msg_data.get('caption', 'ဖိုင်')}"
+        
+        keyboard = [
+            [InlineKeyboardButton("⏸️ PAUSE", callback_data="special_pause")],
+            [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="special_generate")],
+            [InlineKeyboardButton("❌ CANCEL", callback_data="special_cancel")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            f"✅ မက်ဆေ့ချ် #{count} ကို သိမ်းဆည်းပြီးပါပြီ။\n"
-            f"📦 စုစုပေါင်း: {count} ခု\n\n"
-            f"နောက်ထပ် မက်ဆေ့ချ်ထပ်သိမ်းလိုပါက ဆက်ပို့ပါ။\n"
-            f"ပြီးပါက 'Generate Link' ခလုတ်ကို နှိပ်ပါ။",
+            f"✅ **Stored Messages: {count}**\n\n"
+            f"{stored_msg}\n\n"
+            f"Want to add another message? Just send it!\n"
+            f"နောက်ထပ် မက်ဆေ့ချ်ထည့်လိုပါက ဆက်ပို့ပါ။",
             reply_markup=reply_markup
         )
     else:
         await update.message.reply_text("❌ မက်ဆေ့ချ်ကို သိမ်းဆည်းရာတွင် အမှားရှိသည်။")
     
+    return SPECIAL_COLLECT
+
+# ---------- Callback Handlers ----------
+async def special_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    current_pause = context.user_data.get('special_paused', False)
+    new_pause = not current_pause
+    context.user_data['special_paused'] = new_pause
+    
+    status = "⏸️ Paused" if new_pause else "▶️ Resumed"
+    button_text = "▶️ RESUME" if new_pause else "⏸️ PAUSE"
+    
+    keyboard = [
+        [InlineKeyboardButton(button_text, callback_data="special_pause")],
+        [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="special_generate")],
+        [InlineKeyboardButton("❌ CANCEL", callback_data="special_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    count = len(context.user_data.get('special_messages', []))
+    
+    await query.edit_message_text(
+        f"{status}\n\n"
+        f"📦 Stored Messages: {count}\n\n"
+        f"{'ဆက်လက်လက်ခံရန် RESUME ကိုနှိပ်ပါ။' if new_pause else 'မက်ဆေ့ချ်များကို ဆက်လက်ပို့နိုင်ပါသည်။'}",
+        reply_markup=reply_markup
+    )
     return SPECIAL_COLLECT
 
 async def special_generate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -646,66 +691,34 @@ async def special_generate_callback(update: Update, context: ContextTypes.DEFAUL
         return SPECIAL_COLLECT
     
     special_id = context.user_data.get('special_link_id')
-    batch_id = f"special_{special_id}"
     
-    # Save to database with full config
-    special_data = {
-        "messages": messages,
-        "whitelisters": [],
-        "whitelist_enabled": False,
-        "protect_content": False,
-        "auto_expire": None,
-        "created_at": datetime.now(),
-        "updated_at": datetime.now()
-    }
-    batch_collection.update_one(
-        {"batch_id": batch_id},
-        {"$set": special_data},
-        upsert=True
-    )
+    # Save to database
+    save_special_link(special_id, messages)
     
-    # Create Telegraph Page
-    content_parts = []
-    for idx, msg in enumerate(messages, 1):
-        if msg['type'] == 'text':
-            content_parts.append(f"**{idx}.** {msg['text']}")
-        else:
-            content_parts.append(f"**{idx}.** [{msg['type']}]: {msg.get('caption', 'Media')}")
-    
-    full_content = "\n\n---\n\n".join(content_parts)
-    title = f"Special Collection - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    
-    try:
-        page_url = await create_telegraph_page(title, full_content)
-    except:
-        page_url = None
-    
-    deep_link = create_deep_linked_url(BOT_USERNAME, batch_id)
+    # Create Deep Link
+    deep_link = create_deep_linked_url(BOT_USERNAME, f"special_{special_id}")
     
     # Clear state
     context.user_data.pop('special_messages', None)
     context.user_data.pop('special_link_id', None)
-    context.user_data.pop('special_state', None)
+    context.user_data.pop('special_paused', None)
     
-    # Create modify button
+    # Create buttons
     keyboard = [
-        [InlineKeyboardButton("✏️ Modify Link", callback_data=f"modify_link_{special_id}")]
+        [InlineKeyboardButton("✏️ MODIFY LINK", callback_data=f"modify_link_{special_id}")],
+        [InlineKeyboardButton("📤 SHARE URL", callback_data=f"share_url_{special_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        f"✅ **Special Link ဖန်တီးပြီးပါပြီ။**\n\n"
-        f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ်: {len(messages)} ခု\n\n"
-        f"🔗 **မျှဝေရန် Link:**\n{deep_link}\n\n"
-        f"📄 **Telegraph Page:**\n{page_url if page_url else 'ဖန်တီးရာတွင် အမှားရှိသည်'}\n\n"
-        f"✏️ ဤ Link ကို နောက်ပိုင်းတွင် ပြန်လည်ပြင်ဆင်နိုင်ပါသည်။\n"
-        f"🆔 Special ID: `{special_id}`",
+        f"✅ **Here is your special link:**\n\n"
+        f"{deep_link}\n\n"
+        f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ်: {len(messages)} ခု",
         reply_markup=reply_markup
     )
     return ConversationHandler.END
 
-# ---------- SPECIAL: MODIFY ----------
-async def special_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def special_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -713,113 +726,79 @@ async def special_modify_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
         return ConversationHandler.END
     
-    # Get all special links
-    special_links = list(batch_collection.find({"batch_id": {"$regex": "^special_"}}))
+    context.user_data.pop('special_messages', None)
+    context.user_data.pop('special_link_id', None)
+    context.user_data.pop('special_paused', None)
     
-    if not special_links:
-        await query.edit_message_text(
-            "📭 **Special Link မတွေ့ပါ**\n\n"
-            "Special Link တစ်ခုမှ မရှိသေးပါ။\n"
-            "အသစ်ပြုလုပ်လိုပါက 'Create' ကိုနှိပ်ပါ။"
-        )
-        return SPECIAL_MAIN
-    
-    keyboard = []
-    for doc in special_links[:20]:
-        special_id = doc['batch_id'].replace('special_', '')
-        msg_count = len(doc.get('messages', []))
-        created = doc.get('created_at', datetime.now()).strftime('%Y-%m-%d %H:%M')
-        keyboard.append([InlineKeyboardButton(f"📌 {special_id[:8]}... ({msg_count} msgs) - {created}", callback_data=f"modify_select_{special_id}")])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="special_back")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "✏️ **ပြင်ဆင်လိုသော Special Link ကို ရွေးပါ**\n\n"
-        "သို့မဟုတ် ပြင်ဆင်လိုသော Link ကို တိုက်ရိုက်ပို့ပါ။",
-        reply_markup=reply_markup
-    )
-    return SPECIAL_MODIFY_SELECT
+    await query.edit_message_text("❌ Special Link ပြုလုပ်ခြင်းကို ပယ်ဖျက်လိုက်ပါပြီ။")
+    return ConversationHandler.END
 
-async def special_modify_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_special(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('special_messages', None)
+    context.user_data.pop('special_link_id', None)
+    context.user_data.pop('special_paused', None)
+    await update.message.reply_text("❌ Special Link ပြုလုပ်ခြင်းကို ပယ်ဖျက်လိုက်ပါပြီ။")
+    return ConversationHandler.END
+
+# =====================================================
+# 🆕 Modify Special Link (from tutorial)
+# =====================================================
+MODIFY_MAIN, MODIFY_SELECT, MODIFY_EDIT, MODIFY_EDIT_ADD, MODIFY_EDIT_ADD_POS, MODIFY_EDIT_REMOVE, MODIFY_WHITELIST, MODIFY_WHITELIST_ADD, MODIFY_WHITELIST_REMOVE, MODIFY_PROTECT, MODIFY_EXPIRE, MODIFY_EXPIRE_SET = range(200, 212)
+
+async def modify_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    special_id = query.data.replace('modify_select_', '')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
     
+    special_id = query.data.replace('modify_link_', '')
+    context.user_data['modify_special_id'] = special_id
+    return await show_modify_menu(query)
+
+async def show_modify_menu(query):
+    special_id = query.data.replace('modify_link_', '') if 'modify_link_' in query.data else query.data.replace('modify_back_', '')
+    context = query.message._context
+    if 'modify_special_id' in context.user_data:
+        special_id = context.user_data['modify_special_id']
+    
+    doc = get_special_link(special_id)
     if not doc:
         await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
-        return SPECIAL_MAIN
+        return ConversationHandler.END
     
-    context.user_data['modify_special_id'] = special_id
+    messages = doc.get('messages', [])
+    whitelisters = doc.get('whitelisters', [])
+    whitelist_enabled = doc.get('whitelist_enabled', False)
+    protect_content = doc.get('protect_content', False)
+    auto_expire = doc.get('auto_expire', 'Not set')
     
-    # Show modify options
     keyboard = [
         [InlineKeyboardButton("📝 Edit Content", callback_data=f"modify_edit_{special_id}")],
         [InlineKeyboardButton("👥 Whitelisters", callback_data=f"modify_whitelist_{special_id}")],
         [InlineKeyboardButton("🛡️ Protect Content", callback_data=f"modify_protect_{special_id}")],
         [InlineKeyboardButton("⏰ Auto Expire", callback_data=f"modify_expire_{special_id}")],
         [InlineKeyboardButton("🗑️ Delete Link", callback_data=f"modify_delete_{special_id}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="special_back")]
+        [InlineKeyboardButton("🔙 Back", callback_data="modify_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    msg_count = len(doc.get('messages', []))
-    whitelist_count = len(doc.get('whitelisters', []))
-    protect = "✅ Enabled" if doc.get('protect_content', False) else "❌ Disabled"
-    expire = doc.get('auto_expire', 'Not set')
     
     await query.edit_message_text(
         f"✏️ **Modify Special Link**\n\n"
         f"🆔 ID: `{special_id}`\n"
-        f"📦 မက်ဆေ့ချ်: {msg_count} ခု\n"
-        f"👥 Whitelisters: {whitelist_count} ဦး\n"
-        f"🛡️ Protect Content: {protect}\n"
-        f"⏰ Auto Expire: {expire}\n\n"
+        f"📦 မက်ဆေ့ချ်: {len(messages)} ခု\n"
+        f"👥 Whitelisters: {len(whitelisters)} ဦး ({'Enabled ✅' if whitelist_enabled else 'Disabled ❌'})\n"
+        f"🛡️ Protect Content: {'Enabled ✅' if protect_content else 'Disabled ❌'}\n"
+        f"⏰ Auto Expire: {auto_expire}\n\n"
         f"ဘာလုပ်ချင်လဲ ရွေးပါ။",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
-    return SPECIAL_MODIFY
+    return MODIFY_SELECT
 
-# ---------- Modify: Handle link sent directly ----------
-async def special_modify_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    
-    text = update.message.text
-    # Check if it's a special link
-    match = re.search(r'start=special_([a-zA-Z0-9_-]+)', text)
-    if match:
-        special_id = match.group(1)
-        batch_id = f"special_{special_id}"
-        doc = batch_collection.find_one({"batch_id": batch_id})
-        if doc:
-            context.user_data['modify_special_id'] = special_id
-            keyboard = [
-                [InlineKeyboardButton("📝 Edit Content", callback_data=f"modify_edit_{special_id}")],
-                [InlineKeyboardButton("👥 Whitelisters", callback_data=f"modify_whitelist_{special_id}")],
-                [InlineKeyboardButton("🛡️ Protect Content", callback_data=f"modify_protect_{special_id}")],
-                [InlineKeyboardButton("⏰ Auto Expire", callback_data=f"modify_expire_{special_id}")],
-                [InlineKeyboardButton("🗑️ Delete Link", callback_data=f"modify_delete_{special_id}")],
-                [InlineKeyboardButton("🔙 Back", callback_data="special_back")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"✏️ **Modify Special Link**\n\n"
-                f"🆔 ID: `{special_id}`\n"
-                f"ဘာလုပ်ချင်လဲ ရွေးပါ။",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-            return SPECIAL_MODIFY
-    
-    return SPECIAL_MODIFY_SELECT
-
-# ---------- SPECIAL: EDIT CONTENT ----------
-async def special_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Edit Content ----------
+async def modify_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -829,12 +808,11 @@ async def special_edit_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     special_id = query.data.replace('modify_edit_', '')
     context.user_data['edit_special_id'] = special_id
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
-        return SPECIAL_MAIN
+        return MODIFY_SELECT
     
     messages = doc.get('messages', [])
     msg_list = ""
@@ -859,10 +837,10 @@ async def special_edit_callback(update: Update, context: ContextTypes.DEFAULT_TY
         f"ဘာလုပ်ချင်လဲ ရွေးပါ။",
         reply_markup=reply_markup
     )
-    return SPECIAL_EDIT_CONTENT
+    return MODIFY_EDIT
 
-# ---------- Edit Content: Add Message ----------
-async def special_edit_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Edit: Add Message ----------
+async def edit_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -872,12 +850,11 @@ async def special_edit_add_callback(update: Update, context: ContextTypes.DEFAUL
     
     special_id = query.data.replace('edit_add_', '')
     context.user_data['edit_special_id'] = special_id
-    context.user_data['edit_action'] = 'add'
     
     keyboard = [
-        [InlineKeyboardButton("📌 First Position", callback_data="add_pos_first")],
+        [InlineKeyboardButton("📌 First", callback_data="add_pos_first")],
         [InlineKeyboardButton("📌 In Between", callback_data="add_pos_between")],
-        [InlineKeyboardButton("📌 Last Position", callback_data="add_pos_last")],
+        [InlineKeyboardButton("📌 Last", callback_data="add_pos_last")],
         [InlineKeyboardButton("🔙 Back", callback_data=f"edit_back_{special_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -887,37 +864,30 @@ async def special_edit_add_callback(update: Update, context: ContextTypes.DEFAUL
         "မက်ဆေ့ချ်အသစ်ကို ဘယ်နေရာမှာ ထည့်ချင်လဲ ရွေးပါ။",
         reply_markup=reply_markup
     )
-    return SPECIAL_EDIT_ADD
+    return MODIFY_EDIT_ADD
 
-async def special_edit_add_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_add_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     position = query.data.replace('add_pos_', '')
     context.user_data['add_position'] = position
     
-    if position == 'first':
-        context.user_data['add_position_num'] = 0
-        await query.edit_message_text(
-            "📝 ထည့်လိုသော မက်ဆေ့ချ်ကို ပို့ပါ။\n\n"
-            "(ပထမနေရာမှာ ထည့်ပါမည်)"
-        )
-        return SPECIAL_EDIT_ADD
-    elif position == 'last':
-        await query.edit_message_text(
-            "📝 ထည့်လိုသော မက်ဆေ့ချ်ကို ပို့ပါ။\n\n"
-            "(နောက်ဆုံးနေရာမှာ ထည့်ပါမည်)"
-        )
-        return SPECIAL_EDIT_ADD
-    else:  # between
+    if position == 'between':
         await query.edit_message_text(
             "🔢 မက်ဆေ့ချ်အသစ်ကို ဘယ်နေရာမှာ ထည့်ချင်လဲ?\n"
             "နေရာအမှတ် (ဥပမာ - 2 ဆိုရင် မက်ဆေ့ချ် #2 နဲ့ #3 ကြားမှာ ထည့်ပါမည်)\n\n"
             "နေရာအမှတ်ကို ပို့ပါ။"
         )
-        return SPECIAL_EDIT_ADD_POSITION
+        return MODIFY_EDIT_ADD_POS
+    else:
+        await query.edit_message_text(
+            f"📝 ထည့်လိုသော မက်ဆေ့ချ်ကို ပို့ပါ။\n\n"
+            f"({'ပထမနေရာမှာ' if position == 'first' else 'နောက်ဆုံးနေရာမှာ'} ထည့်ပါမည်)"
+        )
+        return MODIFY_EDIT_ADD
 
-async def special_edit_add_position_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_add_position_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
@@ -928,18 +898,17 @@ async def special_edit_add_position_number(update: Update, context: ContextTypes
             f"📝 ထည့်လိုသော မက်ဆေ့ချ်ကို ပို့ပါ။\n\n"
             f"(မက်ဆေ့ချ် #{pos} နဲ့ #{pos+1} ကြားမှာ ထည့်ပါမည်)"
         )
-        return SPECIAL_EDIT_ADD
+        return MODIFY_EDIT_ADD
     except:
         await update.message.reply_text("❌ နေရာအမှတ်ကို နံပါတ်ဖြင့် ပို့ပါ။")
-        return SPECIAL_EDIT_ADD_POSITION
+        return MODIFY_EDIT_ADD_POS
 
-async def special_edit_add_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_add_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
     special_id = context.user_data.get('edit_special_id')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await update.message.reply_text("❌ Special Link ကို ရှာမတွေ့ပါ။")
@@ -947,7 +916,6 @@ async def special_edit_add_collect(update: Update, context: ContextTypes.DEFAULT
     
     messages = doc.get('messages', [])
     
-    # Get new message
     msg_data = None
     if update.message.text:
         msg_data = {"type": "text", "text": update.message.text}
@@ -959,13 +927,12 @@ async def special_edit_add_collect(update: Update, context: ContextTypes.DEFAULT
         msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
     else:
         await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မထည့်နိုင်ပါ။")
-        return SPECIAL_EDIT_ADD
+        return MODIFY_EDIT_ADD
     
     if not msg_data:
         await update.message.reply_text("❌ မက်ဆေ့ချ်ကို မသိမ်းဆည်းနိုင်ပါ။")
-        return SPECIAL_EDIT_ADD
+        return MODIFY_EDIT_ADD
     
-    # Add at position
     position = context.user_data.get('add_position')
     pos_num = context.user_data.get('add_position_num', 0)
     
@@ -979,14 +946,8 @@ async def special_edit_add_collect(update: Update, context: ContextTypes.DEFAULT
         else:
             messages.append(msg_data)
     
-    # Update database
-    batch_collection.update_one(
-        {"batch_id": batch_id},
-        {"$set": {"messages": messages, "updated_at": datetime.now()}},
-        upsert=True
-    )
+    save_special_link(special_id, messages, doc.get('whitelisters', []), doc.get('whitelist_enabled', False), doc.get('protect_content', False), doc.get('auto_expire'))
     
-    # Clear state
     context.user_data.pop('add_position', None)
     context.user_data.pop('add_position_num', None)
     
@@ -997,8 +958,8 @@ async def special_edit_add_collect(update: Update, context: ContextTypes.DEFAULT
     )
     return ConversationHandler.END
 
-# ---------- Edit Content: Remove Message ----------
-async def special_edit_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Edit: Remove Message ----------
+async def edit_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1016,15 +977,14 @@ async def special_edit_remove_callback(update: Update, context: ContextTypes.DEF
         "တစ်ခုထက်ပိုဖျက်ချင်ရင် comma ခြားပြီး ပို့ပါ။\n"
         "(ဥပမာ - 1, 3, 4, 5)"
     )
-    return SPECIAL_EDIT_REMOVE
+    return MODIFY_EDIT_REMOVE
 
-async def special_edit_remove_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_remove_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
     special_id = context.user_data.get('edit_special_id')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await update.message.reply_text("❌ Special Link ကို ရှာမတွေ့ပါ။")
@@ -1033,7 +993,6 @@ async def special_edit_remove_collect(update: Update, context: ContextTypes.DEFA
     messages = doc.get('messages', [])
     
     try:
-        # Parse positions (comma separated)
         positions = [int(x.strip()) for x in update.message.text.split(',')]
         positions.sort(reverse=True)
         
@@ -1043,11 +1002,7 @@ async def special_edit_remove_collect(update: Update, context: ContextTypes.DEFA
                 removed.append(messages.pop(pos - 1))
         
         if removed:
-            batch_collection.update_one(
-                {"batch_id": batch_id},
-                {"$set": {"messages": messages, "updated_at": datetime.now()}},
-                upsert=True
-            )
+            save_special_link(special_id, messages, doc.get('whitelisters', []), doc.get('whitelist_enabled', False), doc.get('protect_content', False), doc.get('auto_expire'))
             await update.message.reply_text(
                 f"✅ မက်ဆေ့ချ် {len(removed)} ခုကို ဖျက်ပြီးပါပြီ။\n"
                 f"📦 ကျန်ရှိသော မက်ဆေ့ချ်: {len(messages)} ခု"
@@ -1059,8 +1014,8 @@ async def special_edit_remove_collect(update: Update, context: ContextTypes.DEFA
     
     return ConversationHandler.END
 
-# ---------- SPECIAL: WHITELISTERS ----------
-async def special_whitelister_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Whitelisters ----------
+async def modify_whitelist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1070,12 +1025,11 @@ async def special_whitelister_callback(update: Update, context: ContextTypes.DEF
     
     special_id = query.data.replace('modify_whitelist_', '')
     context.user_data['whitelist_special_id'] = special_id
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
-        return SPECIAL_MAIN
+        return MODIFY_SELECT
     
     whitelisters = doc.get('whitelisters', [])
     is_enabled = doc.get('whitelist_enabled', False)
@@ -1099,9 +1053,9 @@ async def special_whitelister_callback(update: Update, context: ContextTypes.DEF
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
-    return SPECIAL_WHITELISTER
+    return MODIFY_WHITELIST
 
-async def special_whitelist_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def whitelist_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1110,23 +1064,16 @@ async def special_whitelist_toggle(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
     
     special_id = query.data.replace('whitelist_toggle_', '')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if doc:
         current = doc.get('whitelist_enabled', False)
-        batch_collection.update_one(
-            {"batch_id": batch_id},
-            {"$set": {"whitelist_enabled": not current, "updated_at": datetime.now()}},
-            upsert=True
-        )
-        await query.edit_message_text(
-            f"✅ Whitelister {'ဖွင့်ပြီးပါပြီ' if not current else 'ပိတ်ပြီးပါပြီ'}။"
-        )
+        save_special_link(special_id, doc.get('messages', []), doc.get('whitelisters', []), not current, doc.get('protect_content', False), doc.get('auto_expire'))
+        await query.edit_message_text(f"✅ Whitelister {'ဖွင့်ပြီးပါပြီ' if not current else 'ပိတ်ပြီးပါပြီ'}။")
     
     return ConversationHandler.END
 
-async def special_whitelist_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def whitelist_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1137,19 +1084,16 @@ async def special_whitelist_add(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         "➕ **Add Whitelister**\n\n"
         "ထည့်လိုသော User ID ကို ပို့ပါ။\n\n"
-        "User ID ရယူရန် @MissRose_Bot ကို သုံးပါ။\n"
-        "နည်းလမ်း ၁: User ရဲ့ Message ကို Rose Bot ကို Forward လုပ်ပြီး /id ရိုက်ပါ။\n"
-        "နည်းလမ်း ၂: /id @username ရိုက်ပါ။"
+        "User ID ရယူရန် @MissRose_Bot ကို သုံးပါ။"
     )
-    return SPECIAL_WHITELISTER_ADD
+    return MODIFY_WHITELIST_ADD
 
-async def special_whitelist_add_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def whitelist_add_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
     special_id = context.user_data.get('whitelist_special_id')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await update.message.reply_text("❌ Special Link ကို ရှာမတွေ့ပါ။")
@@ -1160,18 +1104,14 @@ async def special_whitelist_add_collect(update: Update, context: ContextTypes.DE
     
     if user_id not in whitelisters:
         whitelisters.append(user_id)
-        batch_collection.update_one(
-            {"batch_id": batch_id},
-            {"$set": {"whitelisters": whitelisters, "updated_at": datetime.now()}},
-            upsert=True
-        )
+        save_special_link(special_id, doc.get('messages', []), whitelisters, doc.get('whitelist_enabled', False), doc.get('protect_content', False), doc.get('auto_expire'))
         await update.message.reply_text(f"✅ Whitelister `{user_id}` ကို ထည့်ပြီးပါပြီ။")
     else:
         await update.message.reply_text(f"⚠️ Whitelister `{user_id}` ရှိပြီးသားပါ။")
     
     return ConversationHandler.END
 
-async def special_whitelist_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def whitelist_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1183,15 +1123,14 @@ async def special_whitelist_remove(update: Update, context: ContextTypes.DEFAULT
         "🗑️ **Remove Whitelister**\n\n"
         "ဖျက်လိုသော User ID ကို ပို့ပါ။"
     )
-    return SPECIAL_WHITELISTER_REMOVE
+    return MODIFY_WHITELIST_REMOVE
 
-async def special_whitelist_remove_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def whitelist_remove_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
     special_id = context.user_data.get('whitelist_special_id')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await update.message.reply_text("❌ Special Link ကို ရှာမတွေ့ပါ။")
@@ -1202,19 +1141,15 @@ async def special_whitelist_remove_collect(update: Update, context: ContextTypes
     
     if user_id in whitelisters:
         whitelisters.remove(user_id)
-        batch_collection.update_one(
-            {"batch_id": batch_id},
-            {"$set": {"whitelisters": whitelisters, "updated_at": datetime.now()}},
-            upsert=True
-        )
+        save_special_link(special_id, doc.get('messages', []), whitelisters, doc.get('whitelist_enabled', False), doc.get('protect_content', False), doc.get('auto_expire'))
         await update.message.reply_text(f"✅ Whitelister `{user_id}` ကို ဖျက်ပြီးပါပြီ။")
     else:
         await update.message.reply_text(f"⚠️ Whitelister `{user_id}` မတွေ့ပါ။")
     
     return ConversationHandler.END
 
-# ---------- SPECIAL: PROTECT CONTENT ----------
-async def special_protect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Protect Content ----------
+async def modify_protect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1223,21 +1158,16 @@ async def special_protect_callback(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
     
     special_id = query.data.replace('modify_protect_', '')
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
-        return SPECIAL_MAIN
+        return MODIFY_SELECT
     
     current = doc.get('protect_content', False)
     new_status = not current
     
-    batch_collection.update_one(
-        {"batch_id": batch_id},
-        {"$set": {"protect_content": new_status, "updated_at": datetime.now()}},
-        upsert=True
-    )
+    save_special_link(special_id, doc.get('messages', []), doc.get('whitelisters', []), doc.get('whitelist_enabled', False), new_status, doc.get('auto_expire'))
     
     status_text = "Enabled ✅" if new_status else "Disabled ❌"
     await query.edit_message_text(
@@ -1247,8 +1177,8 @@ async def special_protect_callback(update: Update, context: ContextTypes.DEFAULT
     )
     return ConversationHandler.END
 
-# ---------- SPECIAL: AUTO EXPIRE ----------
-async def special_expire_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Auto Expire ----------
+async def modify_expire_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1258,12 +1188,11 @@ async def special_expire_callback(update: Update, context: ContextTypes.DEFAULT_
     
     special_id = query.data.replace('modify_expire_', '')
     context.user_data['expire_special_id'] = special_id
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
+    doc = get_special_link(special_id)
     
     if not doc:
         await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
-        return SPECIAL_MAIN
+        return MODIFY_SELECT
     
     current_expire = doc.get('auto_expire')
     
@@ -1280,9 +1209,9 @@ async def special_expire_callback(update: Update, context: ContextTypes.DEFAULT_
         f"ဘာလုပ်ချင်လဲ ရွေးပါ။",
         reply_markup=reply_markup
     )
-    return SPECIAL_EXPIRE
+    return MODIFY_EXPIRE
 
-async def special_expire_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def expire_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1300,30 +1229,32 @@ async def special_expire_set(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "• `1w` = ၁ ပတ်\n\n"
         "သက်တမ်းကုန်သွားရင် ဘယ်သူမှ ဝင်လို့မရတော့ပါ။"
     )
-    return SPECIAL_EXPIRE_SET
+    return MODIFY_EXPIRE_SET
 
-async def special_expire_set_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def expire_set_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
     special_id = context.user_data.get('expire_special_id')
-    batch_id = f"special_{special_id}"
+    doc = get_special_link(special_id)
+    
+    if not doc:
+        await update.message.reply_text("❌ Special Link ကို ရှာမတွေ့ပါ။")
+        return ConversationHandler.END
     
     expire_time = update.message.text.strip()
     
-    # Parse expire time
     match = re.match(r'^(\d+)([hdmw])$', expire_time.lower())
     if not match:
         await update.message.reply_text(
             "❌ မှန်ကန်သော ပုံစံဖြင့် ပို့ပါ။\n"
             "ဥပမာ: 1h, 2d, 30m, 1w"
         )
-        return SPECIAL_EXPIRE_SET
+        return MODIFY_EXPIRE_SET
     
     value = int(match.group(1))
     unit = match.group(2)
     
-    # Convert to seconds
     if unit == 'm':
         seconds = value * 60
     elif unit == 'h':
@@ -1334,15 +1265,11 @@ async def special_expire_set_collect(update: Update, context: ContextTypes.DEFAU
         seconds = value * 604800
     else:
         await update.message.reply_text("❌ မှန်ကန်သော ယူနစ်ကို သုံးပါ။ (m, h, d, w)")
-        return SPECIAL_EXPIRE_SET
+        return MODIFY_EXPIRE_SET
     
     expire_datetime = datetime.now() + timedelta(seconds=seconds)
     
-    batch_collection.update_one(
-        {"batch_id": batch_id},
-        {"$set": {"auto_expire": expire_datetime.isoformat(), "updated_at": datetime.now()}},
-        upsert=True
-    )
+    save_special_link(special_id, doc.get('messages', []), doc.get('whitelisters', []), doc.get('whitelist_enabled', False), doc.get('protect_content', False), expire_datetime.isoformat())
     
     await update.message.reply_text(
         f"✅ Auto Expire ကို သတ်မှတ်ပြီးပါပြီ။\n\n"
@@ -1351,7 +1278,7 @@ async def special_expire_set_collect(update: Update, context: ContextTypes.DEFAU
     )
     return ConversationHandler.END
 
-async def special_expire_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def expire_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1360,19 +1287,16 @@ async def special_expire_remove(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
     
     special_id = query.data.replace('expire_remove_', '')
-    batch_id = f"special_{special_id}"
+    doc = get_special_link(special_id)
     
-    batch_collection.update_one(
-        {"batch_id": batch_id},
-        {"$set": {"auto_expire": None, "updated_at": datetime.now()}},
-        upsert=True
-    )
+    if doc:
+        save_special_link(special_id, doc.get('messages', []), doc.get('whitelisters', []), doc.get('whitelist_enabled', False), doc.get('protect_content', False), None)
+        await query.edit_message_text("✅ Auto Expire ကို ဖယ်ရှားပြီးပါပြီ။")
     
-    await query.edit_message_text("✅ Auto Expire ကို ဖယ်ရှားပြီးပါပြီ။")
     return ConversationHandler.END
 
-# ---------- SPECIAL: DELETE LINK ----------
-async def special_delete_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Delete Link ----------
+async def modify_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1381,7 +1305,6 @@ async def special_delete_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
     
     special_id = query.data.replace('modify_delete_', '')
-    batch_id = f"special_{special_id}"
     
     keyboard = [
         [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{special_id}")],
@@ -1395,9 +1318,9 @@ async def special_delete_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။",
         reply_markup=reply_markup
     )
-    return SPECIAL_MODIFY
+    return MODIFY_SELECT
 
-async def special_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1406,98 +1329,44 @@ async def special_confirm_delete(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
     
     special_id = query.data.replace('confirm_delete_', '')
-    batch_id = f"special_{special_id}"
+    delete_special_link(special_id)
     
-    result = batch_collection.delete_one({"batch_id": batch_id})
-    
-    if result.deleted_count > 0:
-        await query.edit_message_text(f"✅ **Special Link `{special_id}` ကို အောင်မြင်စွာ ဖျက်ပြီးပါပြီ။**")
-    else:
-        await query.edit_message_text(f"❌ Special Link `{special_id}` ကို ရှာမတွေ့ပါ။")
-    
+    await query.edit_message_text(f"✅ **Special Link `{special_id}` ကို အောင်မြင်စွာ ဖျက်ပြီးပါပြီ။**")
     return ConversationHandler.END
 
-# ---------- SPECIAL: CLOSE & BACK ----------
-async def special_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Share URL ----------
+async def share_url_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("🔒 **Special Link Menu ကိုပိတ်လိုက်ပါပြီ။**")
-    return ConversationHandler.END
-
-async def special_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    special_id = query.data.replace('share_url_', '')
+    deep_link = create_deep_linked_url(BOT_USERNAME, f"special_{special_id}")
     
     keyboard = [
-        [InlineKeyboardButton("➕ Create", callback_data="special_create")],
-        [InlineKeyboardButton("✏️ Modify", callback_data="special_modify")],
-        [InlineKeyboardButton("📝 Edit Content", callback_data="special_edit")],
-        [InlineKeyboardButton("👥 Whitelisters", callback_data="special_whitelister")],
-        [InlineKeyboardButton("🛡️ Protect Content", callback_data="special_protect")],
-        [InlineKeyboardButton("⏰ Auto Expire", callback_data="special_expire")],
-        [InlineKeyboardButton("❌ Close", callback_data="special_close")]
+        [InlineKeyboardButton("✏️ MODIFY LINK", callback_data=f"modify_link_{special_id}")],
+        [InlineKeyboardButton("📤 SHARE URL", callback_data=f"share_url_{special_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        "🔗 **Special Link Management**\n\n"
-        "အောက်ပါခလုတ်များမှ လုပ်ဆောင်ချက်ကို ရွေးပါ။",
+        f"✅ **Here is your special link:**\n\n"
+        f"{deep_link}",
         reply_markup=reply_markup
     )
-    return SPECIAL_MAIN
+    return ConversationHandler.END
 
-async def special_modify_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Modify: Back ----------
+async def modify_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     special_id = query.data.replace('modify_back_', '')
     context.user_data['modify_special_id'] = special_id
-    batch_id = f"special_{special_id}"
-    doc = batch_collection.find_one({"batch_id": batch_id})
-    
-    if not doc:
-        await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
-        return SPECIAL_MAIN
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 Edit Content", callback_data=f"modify_edit_{special_id}")],
-        [InlineKeyboardButton("👥 Whitelisters", callback_data=f"modify_whitelist_{special_id}")],
-        [InlineKeyboardButton("🛡️ Protect Content", callback_data=f"modify_protect_{special_id}")],
-        [InlineKeyboardButton("⏰ Auto Expire", callback_data=f"modify_expire_{special_id}")],
-        [InlineKeyboardButton("🗑️ Delete Link", callback_data=f"modify_delete_{special_id}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="special_back")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    msg_count = len(doc.get('messages', []))
-    whitelist_count = len(doc.get('whitelisters', []))
-    protect = "✅ Enabled" if doc.get('protect_content', False) else "❌ Disabled"
-    expire = doc.get('auto_expire', 'Not set')
-    
-    await query.edit_message_text(
-        f"✏️ **Modify Special Link**\n\n"
-        f"🆔 ID: `{special_id}`\n"
-        f"📦 မက်ဆေ့ချ်: {msg_count} ခု\n"
-        f"👥 Whitelisters: {whitelist_count} ဦး\n"
-        f"🛡️ Protect Content: {protect}\n"
-        f"⏰ Auto Expire: {expire}\n\n"
-        f"ဘာလုပ်ချင်လဲ ရွေးပါ။",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-    return SPECIAL_MODIFY
-
-async def special_edit_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    special_id = query.data.replace('edit_back_', '')
-    return await special_modify_back(update, context)
-
-async def cancel_special(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("❌ Special Link လုပ်ဆောင်ချက်ကို ပယ်ဖျက်လိုက်ပါပြီ။")
-    return ConversationHandler.END
+    return await show_modify_menu(query)
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1585,7 +1454,9 @@ async def set_commands(application: Application):
         ("start", "Bot ကိုစတင်ရန်"),
         ("newpost", "ပို့စ်အသစ်ဖန်တီးရန် (ပုံ+စာ+Video)"),
         ("link", "Video အတွက် Deep Link ထုတ်ရန်"),
-        ("special_link", "Special Link Management"),
+        ("batch", "Channel ထဲက မက်ဆေ့ချ်များကို စုစည်းရန်"),
+        ("custom_batch", "ဖိုင်များကို တစ်ခုချင်းပို့ပြီး စုစည်းရန်"),
+        ("special_link", "Special Link ပြုလုပ်ရန် (CREATE/MODIFY)"),
         ("stats", "စာရင်းအင်းကြည့်ရန်"),
         ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
         ("menu", "Admin Menu ပြသရန်"),
@@ -1596,6 +1467,7 @@ async def set_commands(application: Application):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
+# --- Existing Handlers ---
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
@@ -1609,74 +1481,75 @@ newpost_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_newpost)],
 )
 
-# ---------- Special Link Handler ----------
+# --- Special Link Handler ---
 special_link_handler = ConversationHandler(
     entry_points=[CommandHandler('special_link', special_link_start)],
     states={
-        SPECIAL_MAIN: [
-            CallbackQueryHandler(special_create_callback, pattern="special_create"),
-            CallbackQueryHandler(special_modify_callback, pattern="special_modify"),
-            CallbackQueryHandler(special_close_callback, pattern="special_close"),
-            CallbackQueryHandler(special_back_callback, pattern="special_back")
-        ],
         SPECIAL_COLLECT: [
             MessageHandler(filters.ALL, collect_special_messages),
-            CallbackQueryHandler(special_generate_callback, pattern="special_generate")
-        ],
-        SPECIAL_MODIFY_SELECT: [
-            CallbackQueryHandler(special_modify_select, pattern="^modify_select_"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, special_modify_handle_link),
-            CallbackQueryHandler(special_back_callback, pattern="special_back")
-        ],
-        SPECIAL_MODIFY: [
-            CallbackQueryHandler(special_edit_callback, pattern="^modify_edit_"),
-            CallbackQueryHandler(special_whitelister_callback, pattern="^modify_whitelist_"),
-            CallbackQueryHandler(special_protect_callback, pattern="^modify_protect_"),
-            CallbackQueryHandler(special_expire_callback, pattern="^modify_expire_"),
-            CallbackQueryHandler(special_delete_link, pattern="^modify_delete_"),
-            CallbackQueryHandler(special_modify_back, pattern="^modify_back_"),
-            CallbackQueryHandler(special_back_callback, pattern="special_back")
-        ],
-        SPECIAL_EDIT_CONTENT: [
-            CallbackQueryHandler(special_edit_add_callback, pattern="^edit_add_"),
-            CallbackQueryHandler(special_edit_remove_callback, pattern="^edit_remove_"),
-            CallbackQueryHandler(special_edit_back, pattern="^edit_back_")
-        ],
-        SPECIAL_EDIT_ADD: [
-            CallbackQueryHandler(special_edit_add_position, pattern="^add_pos_"),
-            MessageHandler(filters.ALL, special_edit_add_collect)
-        ],
-        SPECIAL_EDIT_ADD_POSITION: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, special_edit_add_position_number)
-        ],
-        SPECIAL_EDIT_REMOVE: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, special_edit_remove_collect)
-        ],
-        SPECIAL_WHITELISTER: [
-            CallbackQueryHandler(special_whitelist_toggle, pattern="^whitelist_toggle_"),
-            CallbackQueryHandler(special_whitelist_add, pattern="^whitelist_add_"),
-            CallbackQueryHandler(special_whitelist_remove, pattern="^whitelist_remove_"),
-            CallbackQueryHandler(special_modify_back, pattern="^modify_back_")
-        ],
-        SPECIAL_WHITELISTER_ADD: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, special_whitelist_add_collect)
-        ],
-        SPECIAL_WHITELISTER_REMOVE: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, special_whitelist_remove_collect)
-        ],
-        SPECIAL_EXPIRE: [
-            CallbackQueryHandler(special_expire_set, pattern="^expire_set_"),
-            CallbackQueryHandler(special_expire_remove, pattern="^expire_remove_"),
-            CallbackQueryHandler(special_modify_back, pattern="^modify_back_")
-        ],
-        SPECIAL_EXPIRE_SET: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, special_expire_set_collect)
+            CallbackQueryHandler(special_pause_callback, pattern="special_pause"),
+            CallbackQueryHandler(special_generate_callback, pattern="special_generate"),
+            CallbackQueryHandler(special_cancel_callback, pattern="special_cancel")
         ],
     },
     fallbacks=[CommandHandler('cancel', cancel_special)],
 )
 
-# ---------- Add Handlers ----------
+# --- Modify Link Handler ---
+modify_handler = ConversationHandler(
+    entry_points=[
+        CallbackQueryHandler(modify_link_callback, pattern="^modify_link_"),
+    ],
+    states={
+        MODIFY_SELECT: [
+            CallbackQueryHandler(modify_edit_callback, pattern="^modify_edit_"),
+            CallbackQueryHandler(modify_whitelist_callback, pattern="^modify_whitelist_"),
+            CallbackQueryHandler(modify_protect_callback, pattern="^modify_protect_"),
+            CallbackQueryHandler(modify_expire_callback, pattern="^modify_expire_"),
+            CallbackQueryHandler(modify_delete_callback, pattern="^modify_delete_"),
+            CallbackQueryHandler(modify_back_callback, pattern="^modify_back_"),
+            CallbackQueryHandler(share_url_callback, pattern="^share_url_"),
+        ],
+        MODIFY_EDIT: [
+            CallbackQueryHandler(edit_add_callback, pattern="^edit_add_"),
+            CallbackQueryHandler(edit_remove_callback, pattern="^edit_remove_"),
+            CallbackQueryHandler(modify_back_callback, pattern="^edit_back_"),
+        ],
+        MODIFY_EDIT_ADD: [
+            CallbackQueryHandler(edit_add_position, pattern="^add_pos_"),
+            MessageHandler(filters.ALL, edit_add_collect),
+        ],
+        MODIFY_EDIT_ADD_POS: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, edit_add_position_number),
+        ],
+        MODIFY_EDIT_REMOVE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, edit_remove_collect),
+        ],
+        MODIFY_WHITELIST: [
+            CallbackQueryHandler(whitelist_toggle, pattern="^whitelist_toggle_"),
+            CallbackQueryHandler(whitelist_add, pattern="^whitelist_add_"),
+            CallbackQueryHandler(whitelist_remove, pattern="^whitelist_remove_"),
+            CallbackQueryHandler(modify_back_callback, pattern="^modify_back_"),
+        ],
+        MODIFY_WHITELIST_ADD: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, whitelist_add_collect),
+        ],
+        MODIFY_WHITELIST_REMOVE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, whitelist_remove_collect),
+        ],
+        MODIFY_EXPIRE: [
+            CallbackQueryHandler(expire_set, pattern="^expire_set_"),
+            CallbackQueryHandler(expire_remove, pattern="^expire_remove_"),
+            CallbackQueryHandler(modify_back_callback, pattern="^modify_back_"),
+        ],
+        MODIFY_EXPIRE_SET: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, expire_set_collect),
+        ],
+    },
+    fallbacks=[CommandHandler('cancel', cancel)],
+)
+
+# --- Add Handlers ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
 application.add_handler(CommandHandler("link", link_command))
@@ -1694,8 +1567,9 @@ application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
-# ---------- Add Special Link Handler ----------
+# --- Add NEW Handlers ---
 application.add_handler(special_link_handler)
+application.add_handler(modify_handler)
 
 # ---------- Polling ----------
 def run_bot():
