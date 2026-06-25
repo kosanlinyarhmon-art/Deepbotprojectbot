@@ -864,8 +864,8 @@ async def special_modify_select(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return SPECIAL_MODIFY
 
-# ---------- DELETE ----------
-async def special_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- MODIFY: DELETE LINK ----------
+async def modify_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -873,36 +873,11 @@ async def special_delete_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
         return ConversationHandler.END
     
-    special_links = get_all_special_links()
-    if not special_links:
-        await query.edit_message_text("📭 **Special Link မတွေ့ပါ**")
-        return SPECIAL_MAIN
-    
-    keyboard = []
-    for doc in special_links[:20]:
-        special_id = doc['batch_id'].replace('special_', '')
-        msg_count = len(doc.get('messages', []))
-        keyboard.append([InlineKeyboardButton(f"🗑️ {special_id[:8]}... ({msg_count} msgs)", callback_data=f"delete_select_{special_id}")])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="special_back")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "🗑️ **ဖျက်လိုသော Special Link ကို ရွေးပါ**\n\n"
-        "သတိပြုရန် - ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။",
-        reply_markup=reply_markup
-    )
-    return SPECIAL_DELETE
-
-async def special_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    special_id = query.data.replace('delete_select_', '')
+    special_id = query.data.replace('modify_delete_', '')
     
     keyboard = [
         [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{special_id}")],
-        [InlineKeyboardButton("❌ No, Cancel", callback_data="special_back")]
+        [InlineKeyboardButton("❌ No, Cancel", callback_data=f"modify_back_{special_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -912,39 +887,7 @@ async def special_delete_confirm(update: Update, context: ContextTypes.DEFAULT_T
         f"ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။",
         reply_markup=reply_markup
     )
-    return SPECIAL_DELETE
-
-async def special_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    special_id = query.data.replace('confirm_delete_', '')
-    delete_special_link(special_id)
-    
-    await query.edit_message_text(f"✅ **Special Link `{special_id}` ကို အောင်မြင်စွာ ဖျက်ပြီးပါပြီ။**")
-    return ConversationHandler.END
-
-# ---------- BACK ----------
-async def special_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = [
-        [InlineKeyboardButton("➕ CREATE", callback_data="special_create")],
-        [InlineKeyboardButton("✏️ MODIFY", callback_data="special_modify")],
-        [InlineKeyboardButton("🗑️ DELETE", callback_data="special_delete")],
-        [InlineKeyboardButton("❌ CLOSE", callback_data="special_close")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "🔗 **Special Link Management**\n\n"
-        "Do you want to create a new special link, or modify an existing one, or delete it?\n\n"
-        "သင်သည် Special Link အသစ်ပြုလုပ်လိုသလား၊\n"
-        "ရှိပြီးသားတစ်ခုကို ပြင်ဆင်လိုသလား၊ သို့မဟုတ် ဖျက်လိုသလား?",
-        reply_markup=reply_markup
-    )
-    return SPECIAL_MAIN
+    return SPECIAL_MODIFY
 
 # ---------- MODIFY: Edit Content (Add/Remove) ----------
 async def modify_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1561,6 +1504,88 @@ async def modify_link_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode="Markdown"
     )
     return SPECIAL_MODIFY
+
+# ---------- DELETE ----------
+async def special_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    special_links = get_all_special_links()
+    if not special_links:
+        await query.edit_message_text("📭 **Special Link မတွေ့ပါ**")
+        return SPECIAL_MAIN
+    
+    keyboard = []
+    for doc in special_links[:20]:
+        special_id = doc['batch_id'].replace('special_', '')
+        msg_count = len(doc.get('messages', []))
+        keyboard.append([InlineKeyboardButton(f"🗑️ {special_id[:8]}... ({msg_count} msgs)", callback_data=f"delete_select_{special_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="special_back")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🗑️ **ဖျက်လိုသော Special Link ကို ရွေးပါ**\n\n"
+        "သတိပြုရန် - ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_DELETE
+
+async def special_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    special_id = query.data.replace('delete_select_', '')
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{special_id}")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="special_back")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"⚠️ **သေချာပါသလား?**\n\n"
+        f"Special Link `{special_id}` ကို ဖျက်တော့မည်။\n"
+        f"ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_DELETE
+
+async def special_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    special_id = query.data.replace('confirm_delete_', '')
+    delete_special_link(special_id)
+    
+    await query.edit_message_text(f"✅ **Special Link `{special_id}` ကို အောင်မြင်စွာ ဖျက်ပြီးပါပြီ။**")
+    return ConversationHandler.END
+
+# ---------- BACK ----------
+async def special_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ CREATE", callback_data="special_create")],
+        [InlineKeyboardButton("✏️ MODIFY", callback_data="special_modify")],
+        [InlineKeyboardButton("🗑️ DELETE", callback_data="special_delete")],
+        [InlineKeyboardButton("❌ CLOSE", callback_data="special_close")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🔗 **Special Link Management**\n\n"
+        "Do you want to create a new special link, or modify an existing one, or delete it?\n\n"
+        "သင်သည် Special Link အသစ်ပြုလုပ်လိုသလား၊\n"
+        "ရှိပြီးသားတစ်ခုကို ပြင်ဆင်လိုသလား၊ သို့မဟုတ် ဖျက်လိုသလား?",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_MAIN
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
