@@ -44,10 +44,9 @@ file_store_collection = db["file_store"]
 users_collection = db["users"]
 stats_collection = db["stats"]
 
-# ---- New Collections for new commands ----
-batch_collection = db["batch_messages"]       # for /batch and /universal_link
+# New collections for new features
+batch_collection = db["batch_messages"]       # for /batch, /custom_batch, /special_link
 short_links_collection = db["short_links"]    # for /shortener
-# Note: /special_link uses Telegraph directly and doesn't store in DB persistently (except user data)
 
 def init_stats():
     if stats_collection.count_documents({"_id": "total_requests"}) == 0:
@@ -81,11 +80,10 @@ def get_file_info(payload):
         return {"file_id": doc["file_id"], "file_name": doc["file_name"]}
     return None
 
-# ---------- Helpers for New Commands ----------
+# ========== Helper functions for new features ==========
 
-# 1. Batch / Universal storage
 def save_batch_messages(batch_id, messages_data):
-    # messages_data is a list of dicts: {type, text, file_id, caption}
+    """Save a list of messages under a batch_id"""
     batch_collection.update_one(
         {"batch_id": batch_id},
         {"$set": {"messages": messages_data, "created_at": datetime.now()}},
@@ -96,19 +94,6 @@ def get_batch_messages(batch_id):
     doc = batch_collection.find_one({"batch_id": batch_id})
     return doc["messages"] if doc else None
 
-def save_universal_messages(payload, messages_data):
-    # Reusing the same collection but with a different flag or just same structure
-    batch_collection.update_one(
-        {"batch_id": f"uni_{payload}"},
-        {"$set": {"messages": messages_data, "created_at": datetime.now(), "type": "universal"}},
-        upsert=True
-    )
-
-def get_universal_messages(payload):
-    doc = batch_collection.find_one({"batch_id": f"uni_{payload}"})
-    return doc["messages"] if doc else None
-
-# 2. Shortener
 def save_short_link(short_code, original_url):
     short_links_collection.update_one(
         {"short_code": short_code},
@@ -119,6 +104,27 @@ def save_short_link(short_code, original_url):
 def get_original_url(short_code):
     doc = short_links_collection.find_one({"short_code": short_code})
     return doc["original_url"] if doc else None
+
+def extract_message_data(msg):
+    """Extract message data from a Telegram message object"""
+    if msg.text:
+        return {"type": "text", "text": msg.text}
+    elif msg.video:
+        return {"type": "video", "file_id": msg.video.file_id, "caption": msg.caption or "Video"}
+    elif msg.photo:
+        return {"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption or "Photo"}
+    elif msg.document:
+        return {"type": "document", "file_id": msg.document.file_id, "caption": msg.caption or "Document"}
+    elif msg.audio:
+        return {"type": "audio", "file_id": msg.audio.file_id, "caption": msg.caption or "Audio"}
+    elif msg.voice:
+        return {"type": "voice", "file_id": msg.voice.file_id, "caption": "Voice"}
+    elif msg.animation:
+        return {"type": "animation", "file_id": msg.animation.file_id, "caption": msg.caption or "GIF"}
+    else:
+        return {"type": "text", "text": f"Message ID: {msg.message_id}"}
+
+# ========== End helper functions ==========
 
 # ---------- Telegram Configuration ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -172,24 +178,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         
-        # --- 1. Check for SHORTENER link (short_xxx) ---
+        # ===== Handle shortener links =====
         if payload.startswith('short_'):
             short_code = payload[6:]
             original_url = get_original_url(short_code)
             if original_url:
-                await update.message.reply_text(
-                    f"🔗 မူရင်း Link ပါ။\n\n{original_url}"
-                )
+                await update.message.reply_text(f"🔗 မူရင်း Link ပါ။\n\n{original_url}")
             else:
                 await update.message.reply_text("❌ ဤအတိုချုံ့ထားသော Link သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
             return
         
-        # --- 2. Check for BATCH / UNIVERSAL link ---
-        if payload.startswith('batch_') or payload.startswith('uni_'):
+        # ===== Handle batch / special links =====
+        if payload.startswith('batch_') or payload.startswith('special_'):
             batch_id = payload
-            messages = get_batch_messages(batch_id) if payload.startswith('batch_') else get_universal_messages(payload[4:])
+            messages = get_batch_messages(batch_id)
             if not messages:
-                # fallback to old file check
+                # If not found, fallback to single file
                 file_info = get_file_info(payload)
                 if file_info:
                     messages = [{"type": "video", "file_id": file_info["file_id"], "caption": file_info["file_name"]}]
@@ -197,7 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
                     return
             
-            # Check channel membership for batch/uni links
+            # Check channel membership
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 Channel သို့ဝင်ရန်: {INVITE_LINK}",
@@ -210,7 +214,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(f"📦 စုစည်းထားသော အကြောင်းအရာ {len(messages)} ခုကို ပို့ပေးနေပါပြီ...")
             
-            # Send each message in batch
+            # Send each message
             for msg in messages:
                 try:
                     if msg['type'] == 'text':
@@ -221,10 +225,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_photo(chat_id=user_id, photo=msg['file_id'], caption=msg.get('caption', ''))
                     elif msg['type'] == 'document':
                         await context.bot.send_document(chat_id=user_id, document=msg['file_id'], caption=msg.get('caption', ''))
+                    elif msg['type'] == 'audio':
+                        await context.bot.send_audio(chat_id=user_id, audio=msg['file_id'], caption=msg.get('caption', ''))
+                    elif msg['type'] == 'voice':
+                        await context.bot.send_voice(chat_id=user_id, voice=msg['file_id'], caption=msg.get('caption', ''))
+                    elif msg['type'] == 'animation':
+                        await context.bot.send_animation(chat_id=user_id, animation=msg['file_id'], caption=msg.get('caption', ''))
                     else:
                         await context.bot.send_message(chat_id=user_id, text=msg.get('text', 'Unknown message type'))
                 except Exception as e:
                     logger.error(f"Error sending batch item: {e}")
+                    await context.bot.send_message(chat_id=user_id, text=f"❌ မက်ဆေ့ချ်တစ်ခုပို့ရာတွင် အမှား: {str(e)}")
             
             # Send channel buttons
             keyboard = []
@@ -251,7 +262,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
         
-        # --- 3. Existing single file deep link ---
+        # ===== Existing single file deep link =====
         file_info = get_file_info(payload)
         if file_info:
             file_id = file_info["file_id"]
@@ -330,11 +341,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu ----------
+# ---------- Admin Menu (UPDATED) ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
         [InlineKeyboardButton("🔗 Video → Deep Link", callback_data="menu_link")],
+        [InlineKeyboardButton("📦 Custom Batch", callback_data="menu_custom_batch")],
+        [InlineKeyboardButton("🔗 Special Link", callback_data="menu_special_link")],
+        [InlineKeyboardButton("🔗 URL အတိုချုံ့ရန်", callback_data="menu_shortener")],
         [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="menu_stats")],
         [InlineKeyboardButton("📢 ပြန်လွှင့်ခြင်း", callback_data="menu_broadcast")],
         [InlineKeyboardButton("⏰ Schedule ပြုလုပ်ရန်", callback_data="menu_schedule")],
@@ -362,6 +376,12 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📸 `/newpost` command ကို သုံးပါ။ (Post ဖန်တီးရန်)")
     elif data == "menu_link":
         await query.edit_message_text("🔗 `/link` command ကို သုံးပါ။ (Video ပို့ပါက Deep Link ရမည်)")
+    elif data == "menu_custom_batch":
+        await query.edit_message_text("📦 `/custom_batch` command ကို သုံးပါ။\n\nမတူညီသော မက်ဆေ့ချ်များကို စိတ်ကြိုက်ရွေးချယ်ပြီး စုစည်းပါ။")
+    elif data == "menu_special_link":
+        await query.edit_message_text("🔗 `/special_link` command ကို သုံးပါ။\n\nSpecial Link အသစ်ပြုလုပ်ရန်၊ ပြင်ဆင်ရန်၊ ဖျက်ရန်။")
+    elif data == "menu_shortener":
+        await query.edit_message_text("🔗 `/shortener <URL>` command ကို သုံးပါ။\n\nURL ကို အတိုချုံ့ပေးပါမည်။")
     elif data == "menu_stats":
         total_users = users_collection.count_documents({})
         total_files = file_store_collection.count_documents({})
@@ -547,102 +567,258 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- 🆕 NEW COMMANDS IMPLEMENTATION ----------
+# =============================================================================
+# NEW COMMANDS: /custom_batch and /special_link
+# =============================================================================
 
-# ========== 1. /batch ==========
-async def batch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
-        return
-    
-    # Get count from args, default 5
-    limit = 5
-    if context.args and context.args[0].isdigit():
-        limit = int(context.args[0])
-        if limit > 50:
-            limit = 50
-    
-    await update.message.reply_text(f"⏳ Channel ထဲက နောက်ဆုံး {limit} ခုကို စုစည်းနေပါသည်...")
-    
-    try:
-        messages = []
-        async for msg in context.bot.get_chat_history(chat_id=CHANNEL_ID, limit=limit):
-            msg_data = {"type": "text", "text": f"Message ID: {msg.message_id}"}
-            if msg.text:
-                msg_data["text"] = msg.text
-            elif msg.caption:
-                msg_data["text"] = msg.caption
-            
-            if msg.video:
-                msg_data["type"] = "video"
-                msg_data["file_id"] = msg.video.file_id
-                msg_data["caption"] = msg.caption or "Video"
-            elif msg.photo:
-                msg_data["type"] = "photo"
-                msg_data["file_id"] = msg.photo[-1].file_id
-                msg_data["caption"] = msg.caption or "Photo"
-            elif msg.document:
-                msg_data["type"] = "document"
-                msg_data["file_id"] = msg.document.file_id
-                msg_data["caption"] = msg.caption or "Document"
-            elif msg.text:
-                msg_data["type"] = "text"
-                msg_data["text"] = msg.text
-            else:
-                continue  # skip unsupported types
-            
-            messages.append(msg_data)
-        
-        if not messages:
-            await update.message.reply_text("❌ Channel ထဲမှာ မက်ဆေ့ချ် မတွေ့ပါ။")
-            return
-        
-        batch_id = f"batch_{generate_payload()}"
-        save_batch_messages(batch_id, messages)
-        deep_link = create_deep_linked_url(BOT_USERNAME, batch_id)
-        
-        await update.message.reply_text(
-            f"✅ မက်ဆေ့ချ် {len(messages)} ခုကို စုစည်းပြီးပါပြီ။\n\n"
-            f"🔗 ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် အားလုံးကို ရရှိမည်။\n{deep_link}"
-        )
-    except Exception as e:
-        logger.error(f"Batch error: {e}")
-        await update.message.reply_text(f"❌ Batch ပြုလုပ်ရာတွင် အမှားရှိသည်: {str(e)}")
-
-# ========== 2. /custom_batch (Conversation) ==========
-CUSTOM_BATCH_COLLECT = 10
+# ---------- /custom_batch (UPDATED) ----------
+CUSTOM_BATCH_COLLECT = 300
 
 async def custom_batch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
         return ConversationHandler.END
+    
     context.user_data['custom_batch_list'] = []
+    context.user_data['custom_batch_state'] = 'collecting'
+    
     await update.message.reply_text(
-        "📦 Custom Batch အတွက် မက်ဆေ့ချ်များကို Forward (သို့) ရိုက်ထည့်ပေးပါ။\n"
-        "ပြီးပါက `done` လို့ ရိုက်ပေးပါ။"
+        "📦 **Custom Batch ပြုလုပ်ရန်**\n\n"
+        "မတူညီသော မက်ဆေ့ချ်များကို အောက်ပါအတိုင်း ထည့်သွင်းပါ။\n\n"
+        "➡️ **စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ Document အားလုံး လက်ခံပါသည်။**\n"
+        "➡️ မက်ဆေ့ချ်တစ်ခုချင်းစီကို တစ်ခါတည်း ပို့ပါ။\n"
+        "➡️ တိုက်ရိုက်ပို့ပါ၊ Forward လုပ်ပါ၊ သို့မဟုတ် Link ပို့ပါ။\n\n"
+        "မက်ဆေ့ချ်အားလုံး ထည့်ပြီးပါက `done` လို့ ရိုက်ပါ။"
     )
     return CUSTOM_BATCH_COLLECT
 
-async def collect_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def collect_custom_batch_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('custom_batch_state') != 'collecting':
+        return
+    
+    if not is_admin(update.effective_user.id):
+        return
+    
+    # `done` ဆိုရင် စုစည်းပြီး Link ထုတ်ပေးမယ်
     if update.message.text and update.message.text.lower() == 'done':
-        # Finish collecting
         messages = context.user_data.get('custom_batch_list', [])
         if not messages:
-            await update.message.reply_text("⚠️ မက်ဆေ့ချ် အနည်းဆုံး တစ်ခုတော့ ပို့ပေးပါ။")
+            await update.message.reply_text("⚠️ မက်ဆေ့ချ် အနည်းဆုံး တစ်ခုတော့ ထည့်သွင်းပေးပါ။")
             return CUSTOM_BATCH_COLLECT
         
         batch_id = f"batch_{generate_payload()}"
         save_batch_messages(batch_id, messages)
         deep_link = create_deep_linked_url(BOT_USERNAME, batch_id)
+        
         context.user_data.pop('custom_batch_list', None)
+        context.user_data.pop('custom_batch_state', None)
         
         await update.message.reply_text(
-            f"✅ Custom Batch ပြီးပါပြီ။ မက်ဆေ့ချ် {len(messages)} ခု သိမ်းဆည်းထားပါသည်။\n\n"
-            f"🔗 ဤလင့်ကို သုံးပါ။\n{deep_link}"
+            f"✅ **Custom Batch ပြုလုပ်ပြီးပါပြီ။**\n\n"
+            f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ်: {len(messages)} ခု\n\n"
+            f"🔗 **မျှဝေရန် Link:**\n{deep_link}\n\n"
+            f"📌 ပါဝင်သော အမျိုးအစားများ:\n"
+            f"{', '.join(set([msg['type'] for msg in messages]))}"
         )
         return ConversationHandler.END
     
-    # Capture message
+    # Collect message (ALL TYPES)
+    msg_data = None
+    chat_id = None
+    msg_id = None
+    
+    # ---------- Forwarded Message ----------
+    if update.message.forward_from_chat:
+        chat_id = update.message.forward_from_chat.id
+        msg_id = update.message.forward_from_message_id
+        try:
+            forwarded_msg = await context.bot.get_messages(chat_id=chat_id, message_ids=msg_id)
+            if forwarded_msg:
+                msg_data = extract_message_data(forwarded_msg)
+        except Exception as e:
+            logger.error(f"Forwarded message fetch error: {e}")
+            await update.message.reply_text("❌ Forward လုပ်ထားတဲ့ မက်ဆေ့ချ်ကို ဖတ်လို့မရပါ။")
+            return CUSTOM_BATCH_COLLECT
+    
+    # ---------- Link in Text ----------
+    elif update.message.text:
+        text = update.message.text
+        # Private Channel (t.me/c/123456789/123)
+        match = re.search(r't\.me/c/(\d+)/(\d+)', text)
+        if match:
+            channel_id = match.group(1)
+            msg_id = int(match.group(2))
+            chat_id = int(f"-100{channel_id}")
+        else:
+            # Public Channel (t.me/username/123)
+            match = re.search(r't\.me/([^/]+)/(\d+)', text)
+            if match:
+                username = match.group(1)
+                msg_id = int(match.group(2))
+                try:
+                    chat = await context.bot.get_chat(f"@{username}")
+                    chat_id = chat.id
+                except Exception as e:
+                    logger.error(f"Username not found: {e}")
+                    await update.message.reply_text(f"❌ `@{username}` Channel ကို ရှာမတွေ့ပါ။")
+                    return CUSTOM_BATCH_COLLECT
+        
+        if chat_id and msg_id:
+            try:
+                msg = await context.bot.get_messages(chat_id=chat_id, message_ids=msg_id)
+                if msg:
+                    msg_data = extract_message_data(msg)
+            except Exception as e:
+                logger.error(f"Message fetch from link error: {e}")
+                await update.message.reply_text("❌ ဤ Link မှ မက်ဆေ့ချ်ကို ဖတ်လို့မရပါ။")
+                return CUSTOM_BATCH_COLLECT
+    
+    # ---------- Direct Message (TEXT, VIDEO, PHOTO, DOCUMENT, AUDIO, VOICE) ----------
+    else:
+        if update.message.text:
+            msg_data = {"type": "text", "text": update.message.text}
+        elif update.message.video:
+            msg_data = {"type": "video", "file_id": update.message.video.file_id, "caption": update.message.caption or "Video"}
+        elif update.message.photo:
+            msg_data = {"type": "photo", "file_id": update.message.photo[-1].file_id, "caption": update.message.caption or "Photo"}
+        elif update.message.document:
+            msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
+        elif update.message.audio:
+            msg_data = {"type": "audio", "file_id": update.message.audio.file_id, "caption": update.message.caption or "Audio"}
+        elif update.message.voice:
+            msg_data = {"type": "voice", "file_id": update.message.voice.file_id, "caption": "Voice"}
+        elif update.message.animation:
+            msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
+        else:
+            await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
+            return CUSTOM_BATCH_COLLECT
+    
+    if msg_data:
+        context.user_data['custom_batch_list'].append(msg_data)
+        await update.message.reply_text(
+            f"✅ မက်ဆေ့ချ် #{len(context.user_data['custom_batch_list'])} ကို သိမ်းဆည်းပြီးပါပြီ။\n"
+            f"📦 စုစုပေါင်း: {len(context.user_data['custom_batch_list'])} ခု\n"
+            f"📌 အမျိုးအစား: {msg_data['type']}\n\n"
+            f"ဆက်လက်ထည့်သွင်းနိုင်ပါသည်။ ပြီးပါက `done` ရိုက်ပါ။"
+        )
+    else:
+        await update.message.reply_text("❌ မက်ဆေ့ချ်ကို သိမ်းဆည်းရာတွင် အမှားရှိသည်။")
+    
+    return CUSTOM_BATCH_COLLECT
+
+async def cancel_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('custom_batch_list', None)
+    context.user_data.pop('custom_batch_state', None)
+    await update.message.reply_text("❌ Custom Batch ကို ပယ်ဖျက်လိုက်ပါပြီ။")
+    return ConversationHandler.END
+
+# ---------- /special_link (FULL) ----------
+SPECIAL_MAIN, SPECIAL_CREATE, SPECIAL_COLLECT, SPECIAL_MODIFY, SPECIAL_DELETE = range(200, 205)
+
+async def special_link_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ CREATE (အသစ်ပြုလုပ်ရန်)", callback_data="special_create")],
+        [InlineKeyboardButton("✏️ MODIFY (ပြင်ဆင်ရန်)", callback_data="special_modify")],
+        [InlineKeyboardButton("🗑️ DELETE (ဖျက်ရန်)", callback_data="special_delete")],
+        [InlineKeyboardButton("❌ CLOSE (ပိတ်ရန်)", callback_data="special_close")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🔗 **Special Link Management**\n\n"
+        "Do you want to create a new special link, or modify an existing one, or delete it?\n\n"
+        "သင်သည် Special Link အသစ်ပြုလုပ်လိုသလား၊\n"
+        "ရှိပြီးသားတစ်ခုကို ပြင်ဆင်လိုသလား၊ သို့မဟုတ် ဖျက်လိုသလား?\n\n"
+        "To know more click [here](https://mdbotz-tutorial.github.io/)",
+        reply_markup=reply_markup,
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+    return SPECIAL_MAIN
+
+# ---------- SPECIAL: CREATE ----------
+async def special_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    context.user_data['special_messages'] = []
+    context.user_data['special_link_id'] = generate_payload()
+    context.user_data['special_state'] = 'creating'
+    
+    await query.edit_message_text(
+        "📝 **Special Link အသစ်ပြုလုပ်ရန်**\n\n"
+        "သိမ်းဆည်းလိုသော မက်ဆေ့ချ်များကို အောက်ပါအတိုင်း ပို့ပါ။\n"
+        "➡️ စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ Document အားလုံး လက်ခံပါသည်။\n"
+        "➡️ မက်ဆေ့ချ်တစ်ခုချင်းစီကို တစ်ခါတည်း ပို့ပါ။\n\n"
+        "မက်ဆေ့ချ်အားလုံး ထည့်ပြီးပါက `done` လို့ ရိုက်ပါ။"
+    )
+    return SPECIAL_COLLECT
+
+async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('special_state') != 'creating':
+        return
+    
+    if not is_admin(update.effective_user.id):
+        return
+    
+    # `done` ဆိုရင် စုစည်းပြီး Link ထုတ်ပေးမယ်
+    if update.message.text and update.message.text.lower() == 'done':
+        messages = context.user_data.get('special_messages', [])
+        if not messages:
+            await update.message.reply_text("⚠️ မက်ဆေ့ချ် အနည်းဆုံး တစ်ခုတော့ ထည့်သွင်းပေးပါ။")
+            return SPECIAL_COLLECT
+        
+        special_id = context.user_data.get('special_link_id')
+        batch_id = f"special_{special_id}"
+        
+        # Save to database
+        save_batch_messages(batch_id, messages)
+        
+        # Create Telegraph Page
+        content_parts = []
+        for idx, msg in enumerate(messages, 1):
+            if msg['type'] == 'text':
+                content_parts.append(f"**{idx}.** {msg['text']}")
+            else:
+                content_parts.append(f"**{idx}.** [{msg['type']}]: {msg.get('caption', 'Media')}")
+        
+        full_content = "\n\n---\n\n".join(content_parts)
+        title = f"Special Collection - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        try:
+            page_url = await create_telegraph_page(title, full_content)
+        except:
+            page_url = None
+        
+        # Create Deep Link
+        deep_link = create_deep_linked_url(BOT_USERNAME, batch_id)
+        
+        # Clear state
+        context.user_data.pop('special_messages', None)
+        context.user_data.pop('special_link_id', None)
+        context.user_data.pop('special_state', None)
+        
+        # Send response
+        response_text = (
+            f"✅ **Special Link ဖန်တီးပြီးပါပြီ။**\n\n"
+            f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ်: {len(messages)} ခု\n\n"
+            f"🔗 **မျှဝေရန် Link:**\n{deep_link}\n\n"
+            f"📄 **Telegraph Page:**\n{page_url if page_url else 'ဖန်တီးရာတွင် အမှားရှိသည်'}\n\n"
+            f"✏️ ပြင်ဆင်လိုပါက /special_link ကိုသုံးပြီး MODIFY ကိုနှိပ်ပါ။\n"
+            f"🆔 Special ID: `{special_id}`"
+        )
+        await update.message.reply_text(response_text, parse_mode="Markdown")
+        return ConversationHandler.END
+    
+    # Collect message (ALL TYPES)
     msg_data = None
     if update.message.text:
         msg_data = {"type": "text", "text": update.message.text}
@@ -652,21 +828,393 @@ async def collect_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYP
         msg_data = {"type": "photo", "file_id": update.message.photo[-1].file_id, "caption": update.message.caption or "Photo"}
     elif update.message.document:
         msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
+    elif update.message.audio:
+        msg_data = {"type": "audio", "file_id": update.message.audio.file_id, "caption": update.message.caption or "Audio"}
+    elif update.message.voice:
+        msg_data = {"type": "voice", "file_id": update.message.voice.file_id, "caption": "Voice"}
+    elif update.message.animation:
+        msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
+    else:
+        await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
+        return SPECIAL_COLLECT
     
     if msg_data:
-        context.user_data['custom_batch_list'].append(msg_data)
-        await update.message.reply_text(f"✅ မက်ဆေ့ချ် {len(context.user_data['custom_batch_list'])} ကို လက်ခံရရှိပါပြီ။ ဆက်ပို့ပါ (သို့) `done` ရိုက်ပါ။")
+        context.user_data['special_messages'].append(msg_data)
+        await update.message.reply_text(
+            f"✅ မက်ဆေ့ချ် #{len(context.user_data['special_messages'])} ကို သိမ်းဆည်းပြီးပါပြီ။\n"
+            f"📦 စုစုပေါင်း: {len(context.user_data['special_messages'])} ခု\n\n"
+            f"ဆက်လက်ထည့်သွင်းနိုင်ပါသည်။ ပြီးပါက `done` ရိုက်ပါ။"
+        )
     else:
-        await update.message.reply_text("❌ စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ သို့မဟုတ် Document ကိုသာ လက်ခံပါသည်။")
+        await update.message.reply_text("❌ မက်ဆေ့ချ်ကို သိမ်းဆည်းရာတွင် အမှားရှိသည်။")
     
-    return CUSTOM_BATCH_COLLECT
+    return SPECIAL_COLLECT
 
-async def cancel_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('custom_batch_list', None)
-    await update.message.reply_text("Custom Batch ကို ပယ်ဖျက်လိုက်ပါပြီ။")
+# ---------- SPECIAL: MODIFY ----------
+async def special_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    # Get all special links from database
+    special_links = batch_collection.find({"batch_id": {"$regex": "^special_"}})
+    links_list = list(special_links)
+    
+    if not links_list:
+        await query.edit_message_text(
+            "📭 **Special Link မတွေ့ပါ**\n\n"
+            "Special Link တစ်ခုမှ မရှိသေးပါ။\n"
+            "အသစ်ပြုလုပ်လိုပါက 'CREATE' ကိုနှိပ်ပါ။"
+        )
+        return SPECIAL_MAIN
+    
+    # Show list of special links
+    keyboard = []
+    for doc in links_list[:20]:  # Limit to 20
+        special_id = doc['batch_id'].replace('special_', '')
+        msg_count = len(doc.get('messages', []))
+        created = doc.get('created_at', datetime.now()).strftime('%Y-%m-%d %H:%M')
+        button_text = f"📌 {special_id[:8]}... ({msg_count} msgs) - {created}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"modify_{special_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="special_back")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "✏️ **ပြင်ဆင်လိုသော Special Link ကို ရွေးပါ**\n\n"
+        "အောက်ပါစာရင်းမှ ပြင်ဆင်လိုသော Link ကို နှိပ်ပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_MODIFY
+
+async def special_modify_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    special_id = query.data.replace('modify_', '')
+    batch_id = f"special_{special_id}"
+    
+    doc = batch_collection.find_one({"batch_id": batch_id})
+    if not doc:
+        await query.edit_message_text("❌ ဤ Special Link ကို ရှာမတွေ့ပါ။")
+        return SPECIAL_MAIN
+    
+    messages = doc.get('messages', [])
+    context.user_data['modify_special_id'] = special_id
+    context.user_data['modify_messages'] = messages.copy()
+    
+    # Show current messages and options
+    msg_list = ""
+    for idx, msg in enumerate(messages, 1):
+        if msg['type'] == 'text':
+            preview = msg['text'][:50] + "..." if len(msg['text']) > 50 else msg['text']
+            msg_list += f"{idx}. 📝 {preview}\n"
+        else:
+            msg_list += f"{idx}. 🎬 {msg.get('caption', msg['type'])}\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Add More", callback_data="modify_add")],
+        [InlineKeyboardButton("🗑️ Remove Message", callback_data="modify_remove")],
+        [InlineKeyboardButton("🔄 Regenerate Link", callback_data="modify_regenerate")],
+        [InlineKeyboardButton("🔙 Back", callback_data="special_back")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"✏️ **ပြင်ဆင်နေသည်: {special_id}**\n\n"
+        f"📦 မက်ဆေ့ချ် {len(messages)} ခု\n\n"
+        f"{msg_list}\n\n"
+        f"ဘာလုပ်ချင်လဲ ရွေးပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_MODIFY
+
+async def modify_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data['modify_state'] = 'adding'
+    await query.edit_message_text(
+        "➕ **မက်ဆေ့ချ်အသစ်ထည့်ရန်**\n\n"
+        "ထည့်သွင်းလိုသော မက်ဆေ့ချ်ကို ပို့ပါ။\n"
+        "(စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ Document အားလုံး လက်ခံပါသည်)\n\n"
+        "ပြီးပါက `done_add` ရိုက်ပါ။"
+    )
+    return SPECIAL_MODIFY
+
+async def modify_add_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('modify_state') != 'adding':
+        return
+    
+    if update.message.text and update.message.text.lower() == 'done_add':
+        # Save updated messages
+        special_id = context.user_data.get('modify_special_id')
+        messages = context.user_data.get('modify_messages', [])
+        batch_id = f"special_{special_id}"
+        
+        batch_collection.update_one(
+            {"batch_id": batch_id},
+            {"$set": {"messages": messages, "updated_at": datetime.now()}},
+            upsert=True
+        )
+        
+        context.user_data.pop('modify_state', None)
+        
+        await update.message.reply_text(
+            f"✅ မက်ဆေ့ချ် {len(messages)} ခုကို သိမ်းဆည်းပြီးပါပြီ။\n"
+            f"ပြန်လည်ပြင်ဆင်ရန် /special_link ကိုသုံးပါ။"
+        )
+        return ConversationHandler.END
+    
+    # Collect message
+    msg_data = None
+    if update.message.text:
+        msg_data = {"type": "text", "text": update.message.text}
+    elif update.message.video:
+        msg_data = {"type": "video", "file_id": update.message.video.file_id, "caption": update.message.caption or "Video"}
+    elif update.message.photo:
+        msg_data = {"type": "photo", "file_id": update.message.photo[-1].file_id, "caption": update.message.caption or "Photo"}
+    elif update.message.document:
+        msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
+    elif update.message.audio:
+        msg_data = {"type": "audio", "file_id": update.message.audio.file_id, "caption": update.message.caption or "Audio"}
+    elif update.message.voice:
+        msg_data = {"type": "voice", "file_id": update.message.voice.file_id, "caption": "Voice"}
+    elif update.message.animation:
+        msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
+    else:
+        await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မထည့်နိုင်ပါ။")
+        return SPECIAL_MODIFY
+    
+    if msg_data:
+        context.user_data['modify_messages'].append(msg_data)
+        await update.message.reply_text(
+            f"✅ မက်ဆေ့ချ် #{len(context.user_data['modify_messages'])} ကို ထည့်ပြီးပါပြီ။\n"
+            f"ဆက်ထည့်လိုပါက ထပ်ပို့ပါ။ ပြီးပါက `done_add` ရိုက်ပါ။"
+        )
+    else:
+        await update.message.reply_text("❌ မက်ဆေ့ချ်ကို သိမ်းဆည်းရာတွင် အမှားရှိသည်။")
+    
+    return SPECIAL_MODIFY
+
+async def modify_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    messages = context.user_data.get('modify_messages', [])
+    if not messages:
+        await query.edit_message_text("❌ ဖယ်ရှားရန် မက်ဆေ့ချ် မရှိပါ။")
+        return SPECIAL_MODIFY
+    
+    # Show list to remove
+    keyboard = []
+    for idx, msg in enumerate(messages, 1):
+        if msg['type'] == 'text':
+            preview = msg['text'][:30] + "..." if len(msg['text']) > 30 else msg['text']
+            button_text = f"{idx}. 📝 {preview}"
+        else:
+            button_text = f"{idx}. 🎬 {msg.get('caption', msg['type'])}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_{idx}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="modify_back")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🗑️ **ဖယ်ရှားလိုသော မက်ဆေ့ချ်ကို ရွေးပါ**",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_MODIFY
+
+async def modify_remove_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    idx = int(query.data.replace('remove_', '')) - 1
+    messages = context.user_data.get('modify_messages', [])
+    
+    if 0 <= idx < len(messages):
+        removed = messages.pop(idx)
+        context.user_data['modify_messages'] = messages
+        
+        # Update database
+        special_id = context.user_data.get('modify_special_id')
+        batch_id = f"special_{special_id}"
+        batch_collection.update_one(
+            {"batch_id": batch_id},
+            {"$set": {"messages": messages, "updated_at": datetime.now()}},
+            upsert=True
+        )
+        
+        await query.edit_message_text(
+            f"✅ မက်ဆေ့ချ် #{idx+1} ကို ဖယ်ရှားပြီးပါပြီ။\n"
+            f"📦 ကျန်ရှိသော မက်ဆေ့ချ်: {len(messages)} ခု\n\n"
+            f"ဆက်လက်ဖယ်ရှားလိုပါက ထပ်ရွေးပါ။"
+        )
+    else:
+        await query.edit_message_text("❌ မှားယွင်းသော ရွေးချယ်မှုပါ။")
+    
+    return SPECIAL_MODIFY
+
+async def modify_regenerate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    messages = context.user_data.get('modify_messages', [])
+    special_id = context.user_data.get('modify_special_id')
+    
+    if not messages:
+        await query.edit_message_text("❌ Regenerate လုပ်ရန် မက်ဆေ့ချ် မရှိပါ။")
+        return SPECIAL_MODIFY
+    
+    # Create Telegraph Page
+    content_parts = []
+    for idx, msg in enumerate(messages, 1):
+        if msg['type'] == 'text':
+            content_parts.append(f"**{idx}.** {msg['text']}")
+        else:
+            content_parts.append(f"**{idx}.** [{msg['type']}]: {msg.get('caption', 'Media')}")
+    
+    full_content = "\n\n---\n\n".join(content_parts)
+    title = f"Special Collection - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    try:
+        page_url = await create_telegraph_page(title, full_content)
+        deep_link = create_deep_linked_url(BOT_USERNAME, f"special_{special_id}")
+        
+        await query.edit_message_text(
+            f"✅ **Special Link ကို Regenerate လုပ်ပြီးပါပြီ။**\n\n"
+            f"🔗 **မျှဝေရန် Link:**\n{deep_link}\n\n"
+            f"📄 **Telegraph Page:**\n{page_url if page_url else 'ဖန်တီးရာတွင် အမှားရှိသည်'}\n\n"
+            f"📦 မက်ဆေ့ချ် {len(messages)} ခု",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ Regenerate လုပ်ရာတွင် အမှားရှိသည်: {str(e)}")
+    
+    return SPECIAL_MODIFY
+
+# ---------- SPECIAL: DELETE ----------
+async def special_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    # Get all special links
+    special_links = batch_collection.find({"batch_id": {"$regex": "^special_"}})
+    links_list = list(special_links)
+    
+    if not links_list:
+        await query.edit_message_text(
+            "📭 **Special Link မတွေ့ပါ**\n\n"
+            "ဖျက်ရန် Special Link မရှိပါ။"
+        )
+        return SPECIAL_MAIN
+    
+    keyboard = []
+    for doc in links_list[:20]:
+        special_id = doc['batch_id'].replace('special_', '')
+        msg_count = len(doc.get('messages', []))
+        button_text = f"🗑️ {special_id[:8]}... ({msg_count} msgs)"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"delete_{special_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="special_back")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🗑️ **ဖျက်လိုသော Special Link ကို ရွေးပါ**\n\n"
+        "သတိပြုရန် - ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_DELETE
+
+async def special_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    special_id = query.data.replace('delete_', '')
+    batch_id = f"special_{special_id}"
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_delete_{special_id}")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="special_back")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"⚠️ **သေချာပါသလား?**\n\n"
+        f"Special Link `{special_id}` ကို ဖျက်တော့မည်။\n"
+        f"ဖျက်လိုက်ပါက ပြန်ယူလို့မရနိုင်ပါ။\n\n"
+        f"ဆက်လက်လုပ်ဆောင်မည်ဆိုပါက 'Yes, Delete' ကိုနှိပ်ပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_DELETE
+
+async def special_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    special_id = query.data.replace('confirm_delete_', '')
+    batch_id = f"special_{special_id}"
+    
+    result = batch_collection.delete_one({"batch_id": batch_id})
+    
+    if result.deleted_count > 0:
+        await query.edit_message_text(
+            f"✅ **Special Link ကို ဖျက်ပြီးပါပြီ။**\n\n"
+            f"🆔 ID: `{special_id}`\n"
+            f"အောင်မြင်စွာ ဖျက်ဆီးခဲ့ပါသည်။"
+        )
+    else:
+        await query.edit_message_text(f"❌ Special Link `{special_id}` ကို ရှာမတွေ့ပါ။")
+    
     return ConversationHandler.END
 
-# ========== 3. /shortener ==========
+# ---------- SPECIAL: Close and Back ----------
+async def special_close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🔒 **Special Link Menu ကိုပိတ်လိုက်ပါပြီ။**")
+    return ConversationHandler.END
+
+async def special_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ CREATE (အသစ်ပြုလုပ်ရန်)", callback_data="special_create")],
+        [InlineKeyboardButton("✏️ MODIFY (ပြင်ဆင်ရန်)", callback_data="special_modify")],
+        [InlineKeyboardButton("🗑️ DELETE (ဖျက်ရန်)", callback_data="special_delete")],
+        [InlineKeyboardButton("❌ CLOSE (ပိတ်ရန်)", callback_data="special_close")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🔗 **Special Link Management**\n\n"
+        "Do you want to create a new special link, or modify an existing one, or delete it?\n\n"
+        "သင်သည် Special Link အသစ်ပြုလုပ်လိုသလား၊\n"
+        "ရှိပြီးသားတစ်ခုကို ပြင်ဆင်လိုသလား၊ သို့မဟုတ် ဖျက်လိုသလား?",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    return SPECIAL_MAIN
+
+async def cancel_special(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('special_messages', None)
+    context.user_data.pop('special_link_id', None)
+    context.user_data.pop('special_state', None)
+    context.user_data.pop('modify_special_id', None)
+    context.user_data.pop('modify_messages', None)
+    context.user_data.pop('modify_state', None)
+    await update.message.reply_text("❌ Special Link လုပ်ဆောင်ချက်ကို ပယ်ဖျက်လိုက်ပါပြီ။")
+    return ConversationHandler.END
+
+# ---------- /shortener (NEW) ----------
 async def shortener_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
@@ -677,7 +1225,6 @@ async def shortener_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     url = context.args[0]
-    # Basic URL validation
     if not re.match(r'^https?://', url):
         await update.message.reply_text("❌ URL သည် http:// သို့မဟုတ် https:// ဖြင့် စတင်ရပါမည်။")
         return
@@ -692,121 +1239,9 @@ async def shortener_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 မူရင်း URL: {url}"
     )
 
-# ========== 4. /special_link (Telegraph + Editable) ==========
-SPECIAL_LINK_COLLECT = 20
-
-async def special_link_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
-        return ConversationHandler.END
-    context.user_data['special_texts'] = []
-    await update.message.reply_text(
-        "📝 Special Link (Telegraph) အတွက် စာသားများကို ပို့ပေးပါ။\n"
-        "(ပုံ/ဗီဒီယို မပါဘဲ စာသားသက်သက်သာ လက်ခံပါမည်)\n"
-        "ပြီးပါက `done` ရိုက်ပေးပါ။"
-    )
-    return SPECIAL_LINK_COLLECT
-
-async def collect_special_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text.lower() == 'done':
-        texts = context.user_data.get('special_texts', [])
-        if not texts:
-            await update.message.reply_text("⚠️ စာသား အနည်းဆုံး တစ်ခုတော့ ပို့ပေးပါ။")
-            return SPECIAL_LINK_COLLECT
-        
-        full_content = "\n\n---\n\n".join(texts)
-        title = f"Special Collection - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        try:
-            page_url = await create_telegraph_page(title, full_content)
-            if page_url:
-                # Try to get edit link (Telegraph doesn't give a direct "edit link" easily without token,
-                # but we can tell them to edit via telegraph account if they login with same account)
-                # We'll just return the page url. They can edit if they are logged in.
-                await update.message.reply_text(
-                    f"✅ **Special Link (Telegraph Page) ဖန်တီးပြီးပါပြီ။**\n\n"
-                    f"🔗 **ကြည့်ရှုရန် Link:**\n{page_url}\n\n"
-                    f"✏️ ဤစာမျက်နှာကို ပြင်ဆင်လိုပါက **Telegraph** အကောင့်ဖြင့် ဝင်ပြီး Edit လုပ်နိုင်ပါသည်။ "
-                    f"(သို့မဟုတ် ကျွန်ုပ်၏ Dashboard မှတဆင့် စီမံခန့်ခွဲနိုင်ပါသည်)"
-                )
-            else:
-                await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် အမှားရှိသည်။")
-        except Exception as e:
-            logger.error(f"Special link error: {e}")
-            await update.message.reply_text(f"❌ ချို့ယွင်းချက်ရှိသည်: {str(e)}")
-        
-        context.user_data.pop('special_texts', None)
-        return ConversationHandler.END
-    
-    if update.message.text:
-        context.user_data['special_texts'].append(update.message.text)
-        await update.message.reply_text(f"✅ စာသား {len(context.user_data['special_texts'])} ကို လက်ခံရရှိပါပြီ။ ဆက်ပို့ပါ (သို့) `done` ရိုက်ပါ။")
-    else:
-        await update.message.reply_text("❌ စာသားသာ လက်ခံပါသည်။ (ပုံ/ဗီဒီယို မပို့ပါနှင့်)")
-    
-    return SPECIAL_LINK_COLLECT
-
-async def cancel_special_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('special_texts', None)
-    await update.message.reply_text("Special Link ကို ပယ်ဖျက်လိုက်ပါပြီ။")
-    return ConversationHandler.END
-
-# ========== 5. /universal_link (MongoDB based, accessible from all clones) ==========
-UNIVERSAL_LINK_COLLECT = 30
-
-async def universal_link_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
-        return ConversationHandler.END
-    context.user_data['universal_list'] = []
-    await update.message.reply_text(
-        "🌐 Universal Link အတွက် မက်ဆေ့ချ်များကို Forward (သို့) ရိုက်ထည့်ပေးပါ။\n"
-        "(ဒီ Link ကို ဘယ် Bot Clone ကမဆို သုံးလို့ရမည်)\n"
-        "ပြီးပါက `done` ရိုက်ပေးပါ။"
-    )
-    return UNIVERSAL_LINK_COLLECT
-
-async def collect_universal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text.lower() == 'done':
-        messages = context.user_data.get('universal_list', [])
-        if not messages:
-            await update.message.reply_text("⚠️ မက်ဆေ့ချ် အနည်းဆုံး တစ်ခုတော့ ပို့ပေးပါ။")
-            return UNIVERSAL_LINK_COLLECT
-        
-        payload = generate_payload()
-        save_universal_messages(payload, messages)
-        deep_link = create_deep_linked_url(BOT_USERNAME, f"uni_{payload}")
-        context.user_data.pop('universal_list', None)
-        
-        await update.message.reply_text(
-            f"✅ **Universal Link** ပြုလုပ်ပြီးပါပြီ။\n\n"
-            f"🔗 ဤလင့်ကို ဘယ် Bot Clone ကမဆို အလုပ်လုပ်ပါမည်။\n{deep_link}\n\n"
-            f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ် {len(messages)} ခု။"
-        )
-        return ConversationHandler.END
-    
-    msg_data = None
-    if update.message.text:
-        msg_data = {"type": "text", "text": update.message.text}
-    elif update.message.video:
-        msg_data = {"type": "video", "file_id": update.message.video.file_id, "caption": update.message.caption or "Video"}
-    elif update.message.photo:
-        msg_data = {"type": "photo", "file_id": update.message.photo[-1].file_id, "caption": update.message.caption or "Photo"}
-    elif update.message.document:
-        msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
-    
-    if msg_data:
-        context.user_data['universal_list'].append(msg_data)
-        await update.message.reply_text(f"✅ မက်ဆေ့ချ် {len(context.user_data['universal_list'])} ကို လက်ခံရရှိပါပြီ။ ဆက်ပို့ပါ (သို့) `done` ရိုက်ပါ။")
-    else:
-        await update.message.reply_text("❌ စာသား၊ ဗီဒီယို၊ ဓာတ်ပုံ၊ သို့မဟုတ် Document ကိုသာ လက်ခံပါသည်။")
-    
-    return UNIVERSAL_LINK_COLLECT
-
-async def cancel_universal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('universal_list', None)
-    await update.message.reply_text("Universal Link ကို ပယ်ဖျက်လိုက်ပါပြီ။")
-    return ConversationHandler.END
+# =============================================================================
+# END OF NEW COMMANDS
+# =============================================================================
 
 # ---------- Existing Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -888,17 +1323,15 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_menu(update, context)
 
-# ---------- Set Bot Commands ----------
+# ---------- Set Bot Commands (UPDATED) ----------
 async def set_commands(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
         ("newpost", "ပို့စ်အသစ်ဖန်တီးရန် (ပုံ+စာ+Video)"),
         ("link", "Video အတွက် Deep Link ထုတ်ရန်"),
-        ("batch", "Channel ထဲက မက်ဆေ့ချ်များကို စုစည်းရန်"),
         ("custom_batch", "မတူညီသော မက်ဆေ့ချ်များကို စုစည်းရန်"),
+        ("special_link", "Special Link ပြုလုပ်ရန်/ပြင်ဆင်ရန်/ဖျက်ရန်"),
         ("shortener", "URL အတိုချုံ့ရန်"),
-        ("special_link", "Telegraph Page + Editable Link ထုတ်ရန်"),
-        ("universal_link", "Clone အားလုံးသုံးနိုင်သော Link ထုတ်ရန်"),
         ("stats", "စာရင်းအင်းကြည့်ရန်"),
         ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
         ("menu", "Admin Menu ပြသရန်"),
@@ -909,7 +1342,7 @@ async def set_commands(application: Application):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# --- Conversation Handlers ---
+# ---------- Conversation Handlers ----------
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
@@ -926,7 +1359,9 @@ newpost_handler = ConversationHandler(
 custom_batch_handler = ConversationHandler(
     entry_points=[CommandHandler('custom_batch', custom_batch_start)],
     states={
-        CUSTOM_BATCH_COLLECT: [MessageHandler(filters.TEXT | filters.VIDEO | filters.PHOTO | filters.Document.ALL, collect_custom_batch)],
+        CUSTOM_BATCH_COLLECT: [
+            MessageHandler(filters.ALL, collect_custom_batch_messages),
+        ],
     },
     fallbacks=[CommandHandler('cancel', cancel_custom_batch)],
 )
@@ -934,20 +1369,39 @@ custom_batch_handler = ConversationHandler(
 special_link_handler = ConversationHandler(
     entry_points=[CommandHandler('special_link', special_link_start)],
     states={
-        SPECIAL_LINK_COLLECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_special_link)],
+        SPECIAL_MAIN: [
+            CallbackQueryHandler(special_create_callback, pattern="special_create"),
+            CallbackQueryHandler(special_modify_callback, pattern="special_modify"),
+            CallbackQueryHandler(special_delete_callback, pattern="special_delete"),
+            CallbackQueryHandler(special_close_callback, pattern="special_close"),
+            CallbackQueryHandler(special_back_callback, pattern="special_back")
+        ],
+        SPECIAL_CREATE: [
+            CallbackQueryHandler(special_create_callback, pattern="special_create")
+        ],
+        SPECIAL_COLLECT: [
+            MessageHandler(filters.ALL, collect_special_messages),
+            CallbackQueryHandler(special_back_callback, pattern="special_back")
+        ],
+        SPECIAL_MODIFY: [
+            CallbackQueryHandler(special_modify_select, pattern="^modify_"),
+            CallbackQueryHandler(modify_add_callback, pattern="modify_add"),
+            CallbackQueryHandler(modify_remove_callback, pattern="modify_remove"),
+            CallbackQueryHandler(modify_regenerate_callback, pattern="modify_regenerate"),
+            CallbackQueryHandler(special_back_callback, pattern="special_back"),
+            CallbackQueryHandler(special_back_callback, pattern="modify_back"),
+            MessageHandler(filters.ALL, modify_add_collect),
+        ],
+        SPECIAL_DELETE: [
+            CallbackQueryHandler(special_delete_confirm, pattern="^delete_"),
+            CallbackQueryHandler(special_delete_execute, pattern="^confirm_delete_"),
+            CallbackQueryHandler(special_back_callback, pattern="special_back")
+        ],
     },
-    fallbacks=[CommandHandler('cancel', cancel_special_link)],
+    fallbacks=[CommandHandler('cancel', cancel_special)],
 )
 
-universal_link_handler = ConversationHandler(
-    entry_points=[CommandHandler('universal_link', universal_link_start)],
-    states={
-        UNIVERSAL_LINK_COLLECT: [MessageHandler(filters.TEXT | filters.VIDEO | filters.PHOTO | filters.Document.ALL, collect_universal)],
-    },
-    fallbacks=[CommandHandler('cancel', cancel_universal)],
-)
-
-# --- Add Handlers ---
+# ---------- Add Handlers ----------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
 application.add_handler(CommandHandler("link", link_command))
@@ -963,14 +1417,12 @@ application.add_handler(CommandHandler("deleteall", deleteall))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
+application.add_handler(CommandHandler("shortener", shortener_command))
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
-# --- Add NEW Handlers ---
-application.add_handler(CommandHandler("batch", batch_command))
+# Add NEW handlers
 application.add_handler(custom_batch_handler)
-application.add_handler(CommandHandler("shortener", shortener_command))
 application.add_handler(special_link_handler)
-application.add_handler(universal_link_handler)
 
 # ---------- Polling ----------
 def run_bot():
