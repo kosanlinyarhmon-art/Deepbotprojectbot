@@ -612,7 +612,7 @@ async def special_create_callback(update: Update, context: ContextTypes.DEFAULT_
     )
     return SPECIAL_COLLECT
 
-# ---------- Collect Messages (Video အပါအဝင် အားလုံး) ----------
+# ---------- Collect Messages (ပြင်ဆင်ပြီး - Forward Video အပါအဝင်) ----------
 async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -624,39 +624,50 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
     
     msg_data = None
     
-    # ---------- အရင်ဆုံး Media (Video/Photo/Document/etc) ကို စစ်ပါ ----------
-    if update.message.video:
-        msg_data = {"type": "video", "file_id": update.message.video.file_id, "caption": update.message.caption or "Video"}
-    elif update.message.photo:
-        msg_data = {"type": "photo", "file_id": update.message.photo[-1].file_id, "caption": update.message.caption or "Photo"}
-    elif update.message.document:
-        msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
-    elif update.message.audio:
-        msg_data = {"type": "audio", "file_id": update.message.audio.file_id, "caption": update.message.caption or "Audio"}
-    elif update.message.voice:
-        msg_data = {"type": "voice", "file_id": update.message.voice.file_id, "caption": "Voice"}
-    elif update.message.animation:
-        msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
-    # ---------- နောက်မှ စာသား (Text) ကို စစ်ပါ ----------
-    elif update.message.text:
-        msg_data = {"type": "text", "text": update.message.text}
-    else:
-        await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
-        return SPECIAL_COLLECT
-    
-    # ---------- Forwarded Message ကိုလည်း ကိုင်တွယ်ပါ ----------
-    if not msg_data and update.message.forward_from_chat:
+    # ---------- ၁. Forward လုပ်ထားတဲ့ မက်ဆေ့ချ် (Video/Photo/Document အားလုံး) ----------
+    if update.message.forward_from_chat:
         try:
             chat_id = update.message.forward_from_chat.id
             msg_id = update.message.forward_from_message_id
             forwarded_msg = await context.bot.get_messages(chat_id=chat_id, message_ids=msg_id)
             if forwarded_msg:
                 if forwarded_msg.video:
-                    msg_data = {"type": "video", "file_id": forwarded_msg.video.file_id, "caption": forwarded_msg.caption or "Video"}
+                    msg_data = {
+                        "type": "video", 
+                        "file_id": forwarded_msg.video.file_id, 
+                        "caption": forwarded_msg.caption or "Video"
+                    }
+                    logger.info(f"Forwarded Video detected: {forwarded_msg.video.file_id}")
                 elif forwarded_msg.photo:
-                    msg_data = {"type": "photo", "file_id": forwarded_msg.photo[-1].file_id, "caption": forwarded_msg.caption or "Photo"}
+                    msg_data = {
+                        "type": "photo", 
+                        "file_id": forwarded_msg.photo[-1].file_id, 
+                        "caption": forwarded_msg.caption or "Photo"
+                    }
                 elif forwarded_msg.document:
-                    msg_data = {"type": "document", "file_id": forwarded_msg.document.file_id, "caption": forwarded_msg.caption or "Document"}
+                    msg_data = {
+                        "type": "document", 
+                        "file_id": forwarded_msg.document.file_id, 
+                        "caption": forwarded_msg.caption or "Document"
+                    }
+                elif forwarded_msg.audio:
+                    msg_data = {
+                        "type": "audio", 
+                        "file_id": forwarded_msg.audio.file_id, 
+                        "caption": forwarded_msg.caption or "Audio"
+                    }
+                elif forwarded_msg.voice:
+                    msg_data = {
+                        "type": "voice", 
+                        "file_id": forwarded_msg.voice.file_id, 
+                        "caption": "Voice"
+                    }
+                elif forwarded_msg.animation:
+                    msg_data = {
+                        "type": "animation", 
+                        "file_id": forwarded_msg.animation.file_id, 
+                        "caption": forwarded_msg.caption or "GIF"
+                    }
                 elif forwarded_msg.text:
                     msg_data = {"type": "text", "text": forwarded_msg.text}
         except Exception as e:
@@ -664,8 +675,50 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text("❌ Forward လုပ်ထားတဲ့ မက်ဆေ့ချ်ကို ဖတ်လို့မရပါ။")
             return SPECIAL_COLLECT
     
+    # ---------- ၂. တိုက်ရိုက်ပို့တဲ့ Media (Video/Photo/Document) ----------
     if not msg_data:
-        await update.message.reply_text("❌ မက်ဆေ့ချ်ကို မသိမ်းဆည်းနိုင်ပါ။")
+        if update.message.video:
+            msg_data = {
+                "type": "video", 
+                "file_id": update.message.video.file_id, 
+                "caption": update.message.caption or "Video"
+            }
+            logger.info(f"Direct Video detected: {update.message.video.file_id}")
+        elif update.message.photo:
+            msg_data = {
+                "type": "photo", 
+                "file_id": update.message.photo[-1].file_id, 
+                "caption": update.message.caption or "Photo"
+            }
+        elif update.message.document:
+            msg_data = {
+                "type": "document", 
+                "file_id": update.message.document.file_id, 
+                "caption": update.message.caption or "Document"
+            }
+        elif update.message.audio:
+            msg_data = {
+                "type": "audio", 
+                "file_id": update.message.audio.file_id, 
+                "caption": update.message.caption or "Audio"
+            }
+        elif update.message.voice:
+            msg_data = {
+                "type": "voice", 
+                "file_id": update.message.voice.file_id, 
+                "caption": "Voice"
+            }
+        elif update.message.animation:
+            msg_data = {
+                "type": "animation", 
+                "file_id": update.message.animation.file_id, 
+                "caption": update.message.caption or "GIF"
+            }
+        elif update.message.text:
+            msg_data = {"type": "text", "text": update.message.text}
+    
+    if not msg_data:
+        await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
         return SPECIAL_COLLECT
     
     # ---------- သိမ်းဆည်းပါ ----------
@@ -738,7 +791,7 @@ async def create_pause_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return SPECIAL_COLLECT
 
-# ---------- GENERATE LINK ----------
+# ---------- GENERATE LINK (ပြင်ဆင်ပြီး) ----------
 async def create_generate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -747,8 +800,11 @@ async def create_generate_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
         return ConversationHandler.END
     
-    # special_messages ကို ထုတ်ယူပါ
     messages = context.user_data.get('special_messages', [])
+    
+    # Debug - messages ဘယ်လောက်ရှိလဲ စစ်ပါ
+    logger.info(f"Special Link - Messages count: {len(messages)}")
+    
     if not messages:
         await query.edit_message_text("⚠️ မက်ဆေ့ချ် အနည်းဆုံး တစ်ခုတော့ ပို့ပေးပါ။")
         return SPECIAL_COLLECT
