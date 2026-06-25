@@ -612,7 +612,7 @@ async def special_create_callback(update: Update, context: ContextTypes.DEFAULT_
     )
     return SPECIAL_COLLECT
 
-# ---------- Collect Messages (ပုံ ၁ အတိုင်း) - Movie/Video အားလုံး လက်ခံမယ် ----------
+# ---------- Collect Messages (Video အပါအဝင် အားလုံး) ----------
 async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -747,6 +747,7 @@ async def create_generate_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
         return ConversationHandler.END
     
+    # special_messages ကို ထုတ်ယူပါ
     messages = context.user_data.get('special_messages', [])
     if not messages:
         await query.edit_message_text("⚠️ မက်ဆေ့ချ် အနည်းဆုံး တစ်ခုတော့ ပို့ပေးပါ။")
