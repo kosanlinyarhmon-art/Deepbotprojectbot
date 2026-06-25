@@ -217,6 +217,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_audio(chat_id=user_id, audio=msg['file_id'], caption=msg.get('caption', ''))
                     elif msg['type'] == 'voice':
                         await context.bot.send_voice(chat_id=user_id, voice=msg['file_id'])
+                    elif msg['type'] == 'animation':
+                        await context.bot.send_animation(chat_id=user_id, animation=msg['file_id'], caption=msg.get('caption', ''))
                     else:
                         await context.bot.send_message(chat_id=user_id, text=msg.get('text', 'Unknown message type'))
                 except Exception as e:
@@ -612,32 +614,76 @@ async def special_create_callback(update: Update, context: ContextTypes.DEFAULT_
     )
     return SPECIAL_COLLECT
 
-# ---------- Collect Messages (ပုံ ၁ အတိုင်း) ----------
+# ---------- Collect Messages (ပုံ ၁ အတိုင်း) - FIXED FOR MEDIA ----------
 async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     
-    # PAUSE ဖြစ်နေရင် မလက်ခံပါ
     if context.user_data.get('special_paused', False):
         await update.message.reply_text("⏸️ လက်ရှိ Pause ထားပါသည်။ ဆက်လက်လက်ခံရန် 'RESUME' ကိုနှိပ်ပါ။")
         return SPECIAL_COLLECT
     
     msg_data = None
     
+    # ---------- TEXT ----------
     if update.message.text:
         msg_data = {"type": "text", "text": update.message.text}
+    
+    # ---------- VIDEO ----------
     elif update.message.video:
-        msg_data = {"type": "video", "file_id": update.message.video.file_id, "caption": update.message.caption or "Video"}
+        video = update.message.video
+        msg_data = {
+            "type": "video", 
+            "file_id": video.file_id, 
+            "caption": update.message.caption or "Video"
+        }
+    
+    # ---------- PHOTO ----------
     elif update.message.photo:
-        msg_data = {"type": "photo", "file_id": update.message.photo[-1].file_id, "caption": update.message.caption or "Photo"}
+        photo = update.message.photo[-1]
+        msg_data = {
+            "type": "photo", 
+            "file_id": photo.file_id, 
+            "caption": update.message.caption or "Photo"
+        }
+    
+    # ---------- DOCUMENT ----------
     elif update.message.document:
-        msg_data = {"type": "document", "file_id": update.message.document.file_id, "caption": update.message.caption or "Document"}
+        document = update.message.document
+        msg_data = {
+            "type": "document", 
+            "file_id": document.file_id, 
+            "caption": update.message.caption or "Document"
+        }
+    
+    # ---------- AUDIO ----------
     elif update.message.audio:
-        msg_data = {"type": "audio", "file_id": update.message.audio.file_id, "caption": update.message.caption or "Audio"}
+        audio = update.message.audio
+        msg_data = {
+            "type": "audio", 
+            "file_id": audio.file_id, 
+            "caption": update.message.caption or "Audio"
+        }
+    
+    # ---------- VOICE ----------
     elif update.message.voice:
-        msg_data = {"type": "voice", "file_id": update.message.voice.file_id, "caption": "Voice"}
+        voice = update.message.voice
+        msg_data = {
+            "type": "voice", 
+            "file_id": voice.file_id, 
+            "caption": "Voice"
+        }
+    
+    # ---------- ANIMATION (GIF) ----------
     elif update.message.animation:
-        msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
+        animation = update.message.animation
+        msg_data = {
+            "type": "animation", 
+            "file_id": animation.file_id, 
+            "caption": update.message.caption or "GIF"
+        }
+    
+    # ---------- UNSUPPORTED ----------
     else:
         await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
         return SPECIAL_COLLECT
