@@ -617,14 +617,13 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
     if not is_admin(update.effective_user.id):
         return
     
-    # PAUSE ဖြစ်နေရင် မလက်ခံပါ
     if context.user_data.get('special_paused', False):
         await update.message.reply_text("⏸️ လက်ရှိ Pause ထားပါသည်။ ဆက်လက်လက်ခံရန် 'RESUME' ကိုနှိပ်ပါ။")
         return SPECIAL_COLLECT
     
     msg_data = None
     
-    # ---------- ၁. Forward လုပ်ထားတဲ့ မက်ဆေ့ချ် (Video/Photo/Document အားလုံး) ----------
+    # ---------- ၁. Forward လုပ်ထားတဲ့ မက်ဆေ့ချ် ----------
     if update.message.forward_from_chat:
         try:
             chat_id = update.message.forward_from_chat.id
@@ -637,7 +636,6 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
                         "file_id": forwarded_msg.video.file_id, 
                         "caption": forwarded_msg.caption or "Video"
                     }
-                    logger.info(f"Forwarded Video detected: {forwarded_msg.video.file_id}")
                 elif forwarded_msg.photo:
                     msg_data = {
                         "type": "photo", 
@@ -650,30 +648,73 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
                         "file_id": forwarded_msg.document.file_id, 
                         "caption": forwarded_msg.caption or "Document"
                     }
-                elif forwarded_msg.audio:
-                    msg_data = {
-                        "type": "audio", 
-                        "file_id": forwarded_msg.audio.file_id, 
-                        "caption": forwarded_msg.caption or "Audio"
-                    }
-                elif forwarded_msg.voice:
-                    msg_data = {
-                        "type": "voice", 
-                        "file_id": forwarded_msg.voice.file_id, 
-                        "caption": "Voice"
-                    }
-                elif forwarded_msg.animation:
-                    msg_data = {
-                        "type": "animation", 
-                        "file_id": forwarded_msg.animation.file_id, 
-                        "caption": forwarded_msg.caption or "GIF"
-                    }
                 elif forwarded_msg.text:
                     msg_data = {"type": "text", "text": forwarded_msg.text}
         except Exception as e:
             logger.error(f"Forwarded message error: {e}")
             await update.message.reply_text("❌ Forward လုပ်ထားတဲ့ မက်ဆေ့ချ်ကို ဖတ်လို့မရပါ။")
             return SPECIAL_COLLECT
+    
+    # ---------- ၂. တိုက်ရိုက်ပို့တဲ့ Media ----------
+    if not msg_data:
+        if update.message.video:
+            msg_data = {
+                "type": "video", 
+                "file_id": update.message.video.file_id, 
+                "caption": update.message.caption or "Video"
+            }
+        elif update.message.photo:
+            msg_data = {
+                "type": "photo", 
+                "file_id": update.message.photo[-1].file_id, 
+                "caption": update.message.caption or "Photo"
+            }
+        elif update.message.document:
+            msg_data = {
+                "type": "document", 
+                "file_id": update.message.document.file_id, 
+                "caption": update.message.caption or "Document"
+            }
+        elif update.message.text:
+            msg_data = {"type": "text", "text": update.message.text}
+    
+    if not msg_data:
+        await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
+        return SPECIAL_COLLECT
+    
+    # ---------- သိမ်းဆည်းပါ ----------
+    context.user_data['special_messages'].append(msg_data)
+    count = len(context.user_data['special_messages'])
+    
+    type_names = {
+        'text': '📝 စာသား',
+        'video': '🎬 ဗီဒီယို',
+        'photo': '🖼️ ဓာတ်ပုံ',
+        'document': '📄 Document',
+    }
+    type_name = type_names.get(msg_data['type'], msg_data['type'])
+    
+    if msg_data['type'] == 'text':
+        preview = msg_data['text'][:100] + "..." if len(msg_data['text']) > 100 else msg_data['text']
+        stored_msg = f"📝 {preview}"
+    else:
+        stored_msg = f"{type_name}: {msg_data.get('caption', 'ဖိုင်')}"
+    
+    keyboard = [
+        [InlineKeyboardButton("⏸️ PAUSE", callback_data="create_pause")],
+        [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="create_generate")],
+        [InlineKeyboardButton("❌ CANCEL", callback_data="create_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"✅ **Stored Messages: {count}**\n\n"
+        f"{stored_msg}\n\n"
+        f"Want to add another message? Just send it!\n"
+        f"နောက်ထပ် မက်ဆေ့ချ်ထည့်လိုပါက ဆက်ပို့ပါ။",
+        reply_markup=reply_markup
+    )
+    return SPECIAL_COLLECT
     
     # ---------- ၂. တိုက်ရိုက်ပို့တဲ့ Media (Video/Photo/Document) ----------
     if not msg_data:
