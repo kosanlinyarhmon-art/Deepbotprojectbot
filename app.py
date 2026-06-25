@@ -217,8 +217,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_audio(chat_id=user_id, audio=msg['file_id'], caption=msg.get('caption', ''))
                     elif msg['type'] == 'voice':
                         await context.bot.send_voice(chat_id=user_id, voice=msg['file_id'])
-                    elif msg['type'] == 'animation':
-                        await context.bot.send_animation(chat_id=user_id, animation=msg['file_id'], caption=msg.get('caption', ''))
                     else:
                         await context.bot.send_message(chat_id=user_id, text=msg.get('text', 'Unknown message type'))
                 except Exception as e:
@@ -616,74 +614,68 @@ async def special_create_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ---------- Collect Messages (ပုံ ၁ အတိုင်း) - FIXED FOR MEDIA ----------
 async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if we are in collect state
+    if context.user_data.get('special_state') != 'collecting':
+        return
+    
     if not is_admin(update.effective_user.id):
         return
     
+    # PAUSE ဖြစ်နေရင် မလက်ခံပါ
     if context.user_data.get('special_paused', False):
         await update.message.reply_text("⏸️ လက်ရှိ Pause ထားပါသည်။ ဆက်လက်လက်ခံရန် 'RESUME' ကိုနှိပ်ပါ။")
         return SPECIAL_COLLECT
     
     msg_data = None
     
-    # ---------- TEXT ----------
+    # Check for text
     if update.message.text:
         msg_data = {"type": "text", "text": update.message.text}
-    
-    # ---------- VIDEO ----------
+    # Check for video
     elif update.message.video:
-        video = update.message.video
         msg_data = {
             "type": "video", 
-            "file_id": video.file_id, 
+            "file_id": update.message.video.file_id, 
             "caption": update.message.caption or "Video"
         }
-    
-    # ---------- PHOTO ----------
+        logger.info(f"Video received: {update.message.video.file_id}")
+    # Check for photo
     elif update.message.photo:
-        photo = update.message.photo[-1]
         msg_data = {
             "type": "photo", 
-            "file_id": photo.file_id, 
+            "file_id": update.message.photo[-1].file_id, 
             "caption": update.message.caption or "Photo"
         }
-    
-    # ---------- DOCUMENT ----------
+        logger.info(f"Photo received: {update.message.photo[-1].file_id}")
+    # Check for document
     elif update.message.document:
-        document = update.message.document
         msg_data = {
             "type": "document", 
-            "file_id": document.file_id, 
+            "file_id": update.message.document.file_id, 
             "caption": update.message.caption or "Document"
         }
-    
-    # ---------- AUDIO ----------
+        logger.info(f"Document received: {update.message.document.file_id}")
+    # Check for audio
     elif update.message.audio:
-        audio = update.message.audio
         msg_data = {
             "type": "audio", 
-            "file_id": audio.file_id, 
+            "file_id": update.message.audio.file_id, 
             "caption": update.message.caption or "Audio"
         }
-    
-    # ---------- VOICE ----------
+    # Check for voice
     elif update.message.voice:
-        voice = update.message.voice
         msg_data = {
             "type": "voice", 
-            "file_id": voice.file_id, 
+            "file_id": update.message.voice.file_id, 
             "caption": "Voice"
         }
-    
-    # ---------- ANIMATION (GIF) ----------
+    # Check for animation (GIF)
     elif update.message.animation:
-        animation = update.message.animation
         msg_data = {
             "type": "animation", 
-            "file_id": animation.file_id, 
+            "file_id": update.message.animation.file_id, 
             "caption": update.message.caption or "GIF"
         }
-    
-    # ---------- UNSUPPORTED ----------
     else:
         await update.message.reply_text("❌ ဤမက်ဆေ့ချ်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
         return SPECIAL_COLLECT
@@ -723,6 +715,7 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
             f"နောက်ထပ် မက်ဆေ့ချ်ထည့်လိုပါက ဆက်ပို့ပါ။",
             reply_markup=reply_markup
         )
+        logger.info(f"Stored message #{count}: {msg_data['type']}")
     else:
         await update.message.reply_text("❌ မက်ဆေ့ချ်ကို သိမ်းဆည်းရာတွင် အမှားရှိသည်။")
     
@@ -787,6 +780,7 @@ async def create_generate_callback(update: Update, context: ContextTypes.DEFAULT
     context.user_data.pop('special_messages', None)
     context.user_data.pop('special_link_id', None)
     context.user_data.pop('special_paused', None)
+    context.user_data.pop('special_state', None)
     
     # Create buttons
     keyboard = [
@@ -795,10 +789,27 @@ async def create_generate_callback(update: Update, context: ContextTypes.DEFAULT
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # Get message types
+    type_names = {
+        'text': '📝 စာသား',
+        'video': '🎬 ဗီဒီယို',
+        'photo': '🖼️ ဓာတ်ပုံ',
+        'document': '📄 Document',
+        'audio': '🎵 အသံ',
+        'voice': '🎤 အသံမှတ်',
+        'animation': '🎞️ GIF'
+    }
+    types = []
+    for msg in messages:
+        t = type_names.get(msg['type'], msg['type'])
+        if t not in types:
+            types.append(t)
+    
     await query.edit_message_text(
         f"✅ **Here is your special link:**\n\n"
         f"{deep_link}\n\n"
-        f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ်: {len(messages)} ခု",
+        f"📦 သိမ်းဆည်းထားသော မက်ဆေ့ချ်: {len(messages)} ခု\n"
+        f"📌 အမျိုးအစားများ: {', '.join(types)}",
         reply_markup=reply_markup
     )
     return ConversationHandler.END
@@ -815,6 +826,7 @@ async def create_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('special_messages', None)
     context.user_data.pop('special_link_id', None)
     context.user_data.pop('special_paused', None)
+    context.user_data.pop('special_state', None)
     
     await query.edit_message_text("❌ Special Link ပြုလုပ်ခြင်းကို ပယ်ဖျက်လိုက်ပါပြီ။")
     return ConversationHandler.END
@@ -823,6 +835,7 @@ async def cancel_special(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('special_messages', None)
     context.user_data.pop('special_link_id', None)
     context.user_data.pop('special_paused', None)
+    context.user_data.pop('special_state', None)
     await update.message.reply_text("❌ Special Link ပြုလုပ်ခြင်းကို ပယ်ဖျက်လိုက်ပါပြီ။")
     return ConversationHandler.END
 
@@ -934,6 +947,20 @@ async def modify_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=reply_markup
     )
     return SPECIAL_MODIFY
+
+async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    special_id = query.data.replace('confirm_delete_', '')
+    delete_special_link(special_id)
+    
+    await query.edit_message_text(f"✅ **Special Link `{special_id}` ကို အောင်မြင်စွာ ဖျက်ပြီးပါပြီ။**")
+    return ConversationHandler.END
 
 # ---------- MODIFY: Edit Content (Add/Remove) ----------
 async def modify_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1758,7 +1785,10 @@ special_link_handler = ConversationHandler(
             CallbackQueryHandler(special_back_callback, pattern="special_back")
         ],
         SPECIAL_COLLECT: [
-            MessageHandler(filters.ALL, collect_special_messages),
+            MessageHandler(
+                filters.TEXT | filters.VIDEO | filters.PHOTO | filters.Document.ALL | filters.AUDIO | filters.VOICE, 
+                collect_special_messages
+            ),
             CallbackQueryHandler(create_pause_callback, pattern="create_pause"),
             CallbackQueryHandler(create_generate_callback, pattern="create_generate"),
             CallbackQueryHandler(create_cancel_callback, pattern="create_cancel")
