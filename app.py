@@ -333,7 +333,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_batch":
         await query.edit_message_text("📦 `/batch` command ကို သုံးပါ။\n\nChannel ထဲက ပထမဆုံး မက်ဆေ့ချ်ကို Forward လုပ်ပြီး နောက်ဆက်တွဲများကို စုစည်းပါ။")
     elif data == "menu_custom_batch":
-        await query.edit_message_text("📦 `/custom_batch` command ကို သုံးပါ။\n\nဖိုင်များကို တစ်ခုချင်းစီ ပို့ပြီး Done နှိပ်ပါ။")
+        await query.edit_message_text("📦 `/custom_batch` command ကို သုံးပါ။\n\nဖိုင်များကို တစ်ခုချင်းစီ ပို့ပြီး GENERATE LINK နှိပ်ပါ။")
     elif data == "menu_special_link":
         await query.edit_message_text("🔗 `/special_link` command ကို သုံးပါ။\n\nSpecial Link အသစ်ပြုလုပ်ရန်၊ ပြင်ဆင်ရန်၊ ဖျက်ရန်။")
     elif data == "menu_stats":
@@ -522,7 +522,7 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # =====================================================
-# 🆕 /custom_batch - Admin က ဖိုင်တွေ တစ်ခုချင်းပို့ပြီး Done နှိပ်လို့ရအောင်
+# 🆕 /custom_batch - ပုံထဲကအတိုင်း (PAUSE / GENERATE LINK / CANCEL)
 # =====================================================
 CUSTOM_BATCH_COLLECT = 100
 
@@ -533,16 +533,20 @@ async def custom_batch_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     context.user_data['custom_batch_list'] = []
     context.user_data['custom_batch_state'] = 'collecting'
+    context.user_data['custom_batch_paused'] = False
     
-    # "Done ✅" ခလုတ်ကို အပြာရောင်နဲ့ ပြမယ်
-    keyboard = [[InlineKeyboardButton("✅ Done (ပြီးပြီ)", callback_data="custom_done")]]
+    keyboard = [
+        [InlineKeyboardButton("⏸️ PAUSE", callback_data="cb_pause")],
+        [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="cb_generate")],
+        [InlineKeyboardButton("❌ CANCEL", callback_data="cb_cancel")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
         "📦 **Custom Batch ပြုလုပ်ရန်**\n\n"
         "ဗီဒီယို/ဖိုင်များကို တစ်ခုချင်းစီ ပို့ပါ။\n"
         "Bot က ဖိုင်တစ်ခုချင်းစီကို လက်ခံပြီး အတည်ပြုပေးပါမည်။\n\n"
-        "ဖိုင်အားလုံး ပို့ပြီးပါက အောက်ပါ 'Done ✅' ခလုတ်ကို နှိပ်ပါ။",
+        "ဖိုင်အားလုံး ပို့ပြီးပါက 'GENERATE LINK' ခလုတ်ကို နှိပ်ပါ။",
         reply_markup=reply_markup
     )
     return CUSTOM_BATCH_COLLECT
@@ -554,7 +558,11 @@ async def collect_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYP
     if not is_admin(update.effective_user.id):
         return
     
-    # ---------- ဘာဖိုင်ပို့ပို့ လက်ခံမယ် ----------
+    # PAUSE ဖြစ်နေရင် မလက်ခံပါ
+    if context.user_data.get('custom_batch_paused', False):
+        await update.message.reply_text("⏸️ လက်ရှိ Pause ထားပါသည်။ ဆက်လက်လက်ခံရန် 'RESUME' ကိုနှိပ်ပါ။")
+        return CUSTOM_BATCH_COLLECT
+    
     msg_data = None
     
     if update.message.text:
@@ -572,18 +580,14 @@ async def collect_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYP
     elif update.message.animation:
         msg_data = {"type": "animation", "file_id": update.message.animation.file_id, "caption": update.message.caption or "GIF"}
     else:
-        await update.message.reply_text("❌ ဤဖိုင်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။ ဗီဒီယို၊ ဓာတ်ပုံ၊ Document စသည်တို့ကိုသာ ပို့ပါ။")
+        await update.message.reply_text("❌ ဤဖိုင်အမျိုးအစားကို မသိမ်းဆည်းနိုင်ပါ။")
         return CUSTOM_BATCH_COLLECT
     
     if msg_data:
         context.user_data['custom_batch_list'].append(msg_data)
         count = len(context.user_data['custom_batch_list'])
         
-        # ဖိုင်တစ်ခုချင်းစီအတွက် အတည်ပြုစာပို့မယ် + Done ခလုတ်ပါ
-        keyboard = [[InlineKeyboardButton("✅ Done (ပြီးပြီ)", callback_data="custom_done")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # ဖိုင်အမျိုးအစားကို ပြောပြမယ်
+        # သိမ်းလိုက်တဲ့ ဖိုင်ကို ပြသမယ်
         type_names = {
             'text': '📝 စာသား',
             'video': '🎬 ဗီဒီယို',
@@ -595,11 +599,25 @@ async def collect_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYP
         }
         type_name = type_names.get(msg_data['type'], msg_data['type'])
         
+        # သိမ်းထားတဲ့ ဖိုင်အကြောင်း ပြမယ်
+        if msg_data['type'] == 'text':
+            preview = msg_data['text'][:100] + "..." if len(msg_data['text']) > 100 else msg_data['text']
+            stored_msg = f"📝 {preview}"
+        else:
+            stored_msg = f"{type_name}: {msg_data.get('caption', 'ဖိုင်')}"
+        
+        keyboard = [
+            [InlineKeyboardButton("⏸️ PAUSE", callback_data="cb_pause")],
+            [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="cb_generate")],
+            [InlineKeyboardButton("❌ CANCEL", callback_data="cb_cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            f"✅ **ဖိုင် #{count}** ကို သိမ်းဆည်းပြီးပါပြီ။\n"
-            f"📌 အမျိုးအစား: {type_name}\n"
-            f"📦 စုစုပေါင်း: {count} ခု\n\n"
-            f"ဆက်လက်ပို့နိုင်ပါသည်။ ပြီးပါက 'Done ✅' ခလုတ်ကို နှိပ်ပါ။",
+            f"✅ **Stored Messages: {count}**\n\n"
+            f"{stored_msg}\n\n"
+            f"Want to add another message? Just send it!\n"
+            f"နောက်ထပ် ဖိုင်ထည့်လိုပါက ဆက်ပို့ပါ။",
             reply_markup=reply_markup
         )
     else:
@@ -607,7 +625,40 @@ async def collect_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYP
     
     return CUSTOM_BATCH_COLLECT
 
-async def custom_batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Callback Handlers for Custom Batch ----------
+async def custom_batch_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    current_pause = context.user_data.get('custom_batch_paused', False)
+    new_pause = not current_pause
+    context.user_data['custom_batch_paused'] = new_pause
+    
+    status = "⏸️ Paused" if new_pause else "▶️ Resumed"
+    button_text = "▶️ RESUME" if new_pause else "⏸️ PAUSE"
+    
+    keyboard = [
+        [InlineKeyboardButton(button_text, callback_data="cb_pause")],
+        [InlineKeyboardButton("🔗 GENERATE LINK", callback_data="cb_generate")],
+        [InlineKeyboardButton("❌ CANCEL", callback_data="cb_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    count = len(context.user_data.get('custom_batch_list', []))
+    
+    await query.edit_message_text(
+        f"{status}\n\n"
+        f"📦 Stored Messages: {count}\n\n"
+        f"{'ဆက်လက်လက်ခံရန် RESUME ကိုနှိပ်ပါ။' if new_pause else 'ဖိုင်များကို ဆက်လက်ပို့နိုင်ပါသည်။'}",
+        reply_markup=reply_markup
+    )
+    return CUSTOM_BATCH_COLLECT
+
+async def custom_batch_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -628,6 +679,7 @@ async def custom_batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # State ရှင်းမယ်
     context.user_data.pop('custom_batch_list', None)
     context.user_data.pop('custom_batch_state', None)
+    context.user_data.pop('custom_batch_paused', None)
     
     # ဖိုင်အမျိုးအစားစာရင်း
     type_names = {
@@ -654,9 +706,25 @@ async def custom_batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+async def custom_batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Admin များသာ သုံးနိုင်ပါသည်။")
+        return ConversationHandler.END
+    
+    context.user_data.pop('custom_batch_list', None)
+    context.user_data.pop('custom_batch_state', None)
+    context.user_data.pop('custom_batch_paused', None)
+    
+    await query.edit_message_text("❌ Custom Batch ကို ပယ်ဖျက်လိုက်ပါပြီ။")
+    return ConversationHandler.END
+
 async def cancel_custom_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('custom_batch_list', None)
     context.user_data.pop('custom_batch_state', None)
+    context.user_data.pop('custom_batch_paused', None)
     await update.message.reply_text("❌ Custom Batch ကို ပယ်ဖျက်လိုက်ပါပြီ။")
     return ConversationHandler.END
 
@@ -723,7 +791,6 @@ async def collect_special_messages(update: Update, context: ContextTypes.DEFAULT
     if not is_admin(update.effective_user.id):
         return
     
-    # Collect any message type
     msg_data = None
     if update.message.text:
         msg_data = {"type": "text", "text": update.message.text}
@@ -1264,7 +1331,9 @@ custom_batch_handler = ConversationHandler(
     states={
         CUSTOM_BATCH_COLLECT: [
             MessageHandler(filters.ALL, collect_custom_batch),
-            CallbackQueryHandler(custom_batch_done, pattern="custom_done")
+            CallbackQueryHandler(custom_batch_pause, pattern="cb_pause"),
+            CallbackQueryHandler(custom_batch_generate, pattern="cb_generate"),
+            CallbackQueryHandler(custom_batch_cancel, pattern="cb_cancel")
         ],
     },
     fallbacks=[CommandHandler('cancel', cancel_custom_batch)],
