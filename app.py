@@ -231,13 +231,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu (မြန်မာလို) ----------
+# ---------- Admin Menu (မြန်မာလို - /editlink ဖယ်ထားပြီး) ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
         [InlineKeyboardButton("🔗 Video → Deep Link", callback_data="menu_link")],
-        [InlineKeyboardButton("📦 Batch Link ထုတ်ရန်", callback_data="menu_batch")],  # NEW
-        [InlineKeyboardButton("✏️ Link ပြင်ရန်", callback_data="menu_edit")],        # NEW
+        [InlineKeyboardButton("📦 Batch Link ထုတ်ရန်", callback_data="menu_batch")],  # ဒီဟာပဲကျန်တယ်
         [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="menu_stats")],
         [InlineKeyboardButton("📢 ပြန်လွှင့်ခြင်း", callback_data="menu_broadcast")],
         [InlineKeyboardButton("⏰ Schedule ပြုလုပ်ရန်", callback_data="menu_schedule")],
@@ -267,8 +266,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔗 `/link` command ကို သုံးပါ။ (Video ပို့ပါက Deep Link ရမည်)")
     elif data == "menu_batch":
         await query.edit_message_text("📦 `/batchlink` command ကို သုံးပါ။ (ဖိုင်အများကြီးကို link တစ်ခုတည်းနဲ့ ချိတ်ရန်)")
-    elif data == "menu_edit":
-        await query.edit_message_text("✏️ `/editlink` command ကို သုံးပါ။ (ရှိပြီးသား Link ကို ပြင်ရန်)")
     elif data == "menu_stats":
         total_users = users_collection.count_documents({})
         total_files = file_store_collection.count_documents({})
@@ -372,95 +369,6 @@ async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
     context.user_data.pop('batch_files', None)
     return ConversationHandler.END
-
-# ---------- NEW: /editlink Command ----------
-async def editlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
-        return
-    all_docs = list(file_store_collection.find({}, {"payload": 1, "files": 1}))
-    if not all_docs:
-        await update.message.reply_text("❌ Link မရှိသေးပါ။")
-        return
-    keyboard = []
-    for doc in all_docs:
-        payload = doc.get("payload")
-        files = doc.get("files", [])
-        if files:
-            first_file = files[0]['file_name'] if files else "Unknown"
-            keyboard.append([InlineKeyboardButton(f"{first_file} ({len(files)} files)", callback_data=f"edit_{payload}")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("🔧 ပြင်ဆင်လိုသော Link ကို ရွေးပါ:", reply_markup=reply_markup)
-
-async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    payload = query.data.replace("edit_", "")
-    doc = file_store_collection.find_one({"payload": payload})
-    if not doc:
-        await query.edit_message_text("❌ ဒီ Link မရှိတော့ပါ။")
-        return
-    files = doc.get("files", [])
-    if not files:
-        await query.edit_message_text("ဒီ Link တွင် ဖိုင်မရှိပါ။")
-        return
-    file_list = "\n".join([f"{idx+1}. {f['file_name']}" for idx, f in enumerate(files)])
-    keyboard = [
-        [InlineKeyboardButton("➕ ဖိုင်ထပ်ထည့်", callback_data=f"addfile_{payload}")],
-        [InlineKeyboardButton("❌ နောက်ဆုံးဖိုင်ဖျက်", callback_data=f"delfile_{payload}")],
-        [InlineKeyboardButton("🗑️ Link တစ်ခုလုံးဖျက်", callback_data=f"deletelink_{payload}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
-        text=f"📌 Link: `{payload}`\n\n📂 ဖိုင်များ:\n{file_list}",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-    context.user_data['editing_payload'] = payload
-
-async def addfile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    payload = query.data.replace("addfile_", "")
-    context.user_data['editing_payload'] = payload
-    await query.edit_message_text("📤 ထပ်ထည့်လိုသော Video ဖိုင်ကို ပို့ပေးပါ။")
-    context.user_data['waiting_for_addfile'] = True
-
-async def handle_addfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    if context.user_data.get('waiting_for_addfile'):
-        video = update.message.video or update.message.document
-        if video:
-            payload = context.user_data['editing_payload']
-            file_id = video.file_id
-            file_name = getattr(video, 'file_name', "ဇာတ်ကား")
-            save_file_info(payload, file_id, file_name)
-            await update.message.reply_text(f"✅ {file_name} ကို ထပ်ထည့်ပြီးပါပြီ။")
-            context.user_data.pop('waiting_for_addfile', None)
-            context.user_data.pop('editing_payload', None)
-        else:
-            await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
-
-async def delfile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    payload = query.data.replace("delfile_", "")
-    doc = file_store_collection.find_one({"payload": payload})
-    if not doc or not doc.get("files"):
-        await query.edit_message_text("❌ ဖိုင်မရှိပါ။")
-        return
-    files = doc["files"]
-    removed = files.pop()
-    file_store_collection.update_one({"payload": payload}, {"$set": {"files": files}})
-    await query.edit_message_text(f"❌ {removed['file_name']} ကို ဖျက်ပြီးပါပြီ။")
-
-async def deletelink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    payload = query.data.replace("deletelink_", "")
-    file_store_collection.delete_one({"payload": payload})
-    await query.edit_message_text(f"🗑️ Link `{payload}` ကို ဖျက်ပြီးပါပြီ။", parse_mode="Markdown")
 
 # ---------- /newpost Command (unchanged) ----------
 POSTER, CAPTION, VIDEO_FILE, WAITING_VIDEO = range(4)
@@ -668,14 +576,13 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_menu(update, context)
 
-# ---------- Set Bot Commands for Telegram Menu ----------
+# ---------- Set Bot Commands for Telegram Menu (editlink ဖယ်ထားပြီး) ----------
 async def set_commands(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
         ("newpost", "ပို့စ်အသစ်ဖန်တီးရန် (ပုံ+စာ+Video)"),
         ("link", "Video တစ်ခုအတွက် Deep Link ထုတ်ရန်"),
         ("batchlink", "Video အများကြီးအတွက် Deep Link တစ်ခုတည်းထုတ်ရန်"),
-        ("editlink", "ရှိပြီးသား Deep Link ကို ပြင်ဆင်ရန်"),
         ("stats", "စာရင်းအင်းကြည့်ရန်"),
         ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
         ("menu", "Admin Menu ပြသရန်"),
@@ -700,7 +607,7 @@ newpost_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_newpost)],
 )
 
-# NEW: ConversationHandler for batchlink
+# ConversationHandler for batchlink
 batchlink_handler = ConversationHandler(
     entry_points=[CommandHandler('batchlink', batchlink_start)],
     states={
@@ -712,18 +619,12 @@ batchlink_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', batch_cancel)],
 )
 
-# Add handlers
+# Add handlers (editlink နဲ့ဆိုင်တဲ့ handler အကုန်ဖယ်ထားပြီး)
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
 application.add_handler(batchlink_handler)
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
-application.add_handler(CommandHandler("editlink", editlink_command))
-application.add_handler(CallbackQueryHandler(edit_callback, pattern="^edit_"))
-application.add_handler(CallbackQueryHandler(addfile_callback, pattern="^addfile_"))
-application.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_addfile))
-application.add_handler(CallbackQueryHandler(delfile_callback, pattern="^delfile_"))
-application.add_handler(CallbackQueryHandler(deletelink_callback, pattern="^deletelink_"))
 application.add_handler(CommandHandler("menu", menu_command))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("broadcast", broadcast))
