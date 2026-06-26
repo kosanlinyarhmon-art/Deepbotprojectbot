@@ -231,12 +231,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu (မြန်မာလို - /editlink ဖယ်ထားပြီး) ----------
+# ---------- Admin Menu (မြန်မာလို - "✏️ Link ပြင်ရန်" မပါ) ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
         [InlineKeyboardButton("🔗 Video → Deep Link", callback_data="menu_link")],
-        [InlineKeyboardButton("📦 Batch Link ထုတ်ရန်", callback_data="menu_batch")],  # ဒီဟာပဲကျန်တယ်
+        [InlineKeyboardButton("📦 Batch Link ထုတ်ရန်", callback_data="menu_batch")],
         [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="menu_stats")],
         [InlineKeyboardButton("📢 ပြန်လွှင့်ခြင်း", callback_data="menu_broadcast")],
         [InlineKeyboardButton("⏰ Schedule ပြုလုပ်ရန်", callback_data="menu_schedule")],
@@ -576,7 +576,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_menu(update, context)
 
-# ---------- Set Bot Commands for Telegram Menu (editlink ဖယ်ထားပြီး) ----------
+# ---------- Set Bot Commands for Telegram Menu (editlink မပါ) ----------
 async def set_commands(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
@@ -619,7 +619,7 @@ batchlink_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', batch_cancel)],
 )
 
-# Add handlers (editlink နဲ့ဆိုင်တဲ့ handler အကုန်ဖယ်ထားပြီး)
+# Add handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
 application.add_handler(batchlink_handler)
@@ -657,7 +657,6 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    # Run migration before starting
     migrate_old_documents()
     threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
