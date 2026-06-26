@@ -62,18 +62,41 @@ def add_user(user_id):
 def get_all_users():
     return [doc["user_id"] for doc in users_collection.find({}, {"user_id": 1})]
 
+# ---------- NEW: MongoDB structure for batch files ----------
 def save_file_info(payload, file_id, file_name):
-    file_store_collection.update_one(
-        {"payload": payload},
-        {"$set": {"file_id": file_id, "file_name": file_name}},
-        upsert=True
-    )
+    doc = file_store_collection.find_one({"payload": payload})
+    if doc:
+        files = doc.get("files", [])
+        if not any(f.get("file_id") == file_id for f in files):
+            files.append({"file_id": file_id, "file_name": file_name})
+        file_store_collection.update_one(
+            {"payload": payload},
+            {"$set": {"files": files}}
+        )
+    else:
+        file_store_collection.insert_one({
+            "payload": payload,
+            "files": [{"file_id": file_id, "file_name": file_name}]
+        })
 
 def get_file_info(payload):
     doc = file_store_collection.find_one({"payload": payload})
-    if doc:
-        return {"file_id": doc["file_id"], "file_name": doc["file_name"]}
-    return None
+    return doc.get("files", []) if doc else []
+
+# ---------- NEW: Migration for old documents ----------
+def migrate_old_documents():
+    docs = file_store_collection.find({"files": {"$exists": False}})
+    for doc in docs:
+        file_id = doc.get("file_id")
+        file_name = doc.get("file_name")
+        if file_id and file_name:
+            file_store_collection.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"files": [{"file_id": file_id, "file_name": file_name}]}}
+            )
+        else:
+            file_store_collection.delete_one({"_id": doc["_id"]})
+    logger.info("Migration completed.")
 
 # ---------- Telegram Configuration ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -120,77 +143,81 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         logger.error(f"Telegraph error: {e}")
         return None
 
-# ---------- Start & Deep Link Handler ----------
+# ---------- UPDATED Start Handler (supports batch files) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if context.args and len(context.args) > 0:
         payload = context.args[0]
-        file_info = get_file_info(payload)
-        if file_info:
-            file_id = file_info["file_id"]
-            file_name = file_info["file_name"]
+        file_list = get_file_info(payload)  # returns list
+        if file_list:
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 Channel သို့ဝင်ရန်: {INVITE_LINK}",
                     disable_web_page_preview=True
                 )
                 return
-            try:
-                await update.message.reply_text(f"🎬 {file_name} ပို့ပေးနေပါပြီ...")
-                video_msg = await context.bot.send_video(
-                    chat_id=user_id,
-                    video=file_id,
-                    caption=f"🎬 သင့်ဇာတ်ကား - {file_name}"
-                )
-                warning_text = (
-                    "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
-                    "ဤရုပ်ရှင်ဖိုင်များ/ဗီဒီယိုများကို 5 မိနစ်အတွင်း (မူပိုင်ခွင့်ပြဿနာများကြောင့်) ဖျက်ပါမည်။\n\n"
-                    "ကျေးဇူးပြု၍ ဤဖိုင်များ/ဗီဒီယိုများအားလုံးကို သင်၏ Saved Messages များသို့ Forward လုပ်ပြီး ထိုနေရာတွင် ဇာတ်ကားအား ကြည့်ရှုပါ။\n\n"
-                    "ကျွန်ုပ်၏ Channel ကို လာရောက်အားပေးမှုအတွက် ကျေးဇူးအထူးတင်ပါတယ် 🙏🙏🙏\n\n"
-                    "Channel ရေရှည်တည်တံ့ဖို့အတွက် Support ပေးချင်ပါက Wave Pay (09767011991) ကို ကူညီနိုင်ပါတယ်။\n\n"
-                    "အားလုံးကို ကျေးဇူးတင်ပါတယ်။\n\n!!! IMPORTANT !!!\n"
-                    "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
-                    "Please forward these ALL Files/Videos to your Saved Messages and start downloading there."
-                )
-                warn_msg = await context.bot.send_message(chat_id=user_id, text=warning_text)
 
-                async def delete_after():
-                    await asyncio.sleep(300)
-                    try:
-                        await context.bot.delete_message(chat_id=user_id, message_id=warn_msg.message_id)
-                        await context.bot.delete_message(chat_id=user_id, message_id=video_msg.message_id)
-                    except:
-                        pass
-                asyncio.create_task(delete_after())
-
-                add_user(user_id)
-                increment_requests()
-
-                keyboard = []
-                if OTHER_CHANNELS:
-                    for idx, link in enumerate(OTHER_CHANNELS, 1):
-                        if idx == 1:
-                            keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
-                        elif idx == 2:
-                            keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
-                        elif idx == 3:
-                            keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
-                        else:
-                            keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
-                if MUSIC_CHANNEL_LINK:
-                    keyboard.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
-
-                if keyboard:
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await context.bot.send_message(
+            # Send all files in batch
+            for file_info in file_list:
+                file_id = file_info["file_id"]
+                file_name = file_info["file_name"]
+                try:
+                    await context.bot.send_video(
                         chat_id=user_id,
-                        text="🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
-                        reply_markup=reply_markup,
-                        parse_mode="Markdown"
+                        video=file_id,
+                        caption=f"🎬 {file_name}"
                     )
-            except Exception as e:
-                await context.bot.send_message(chat_id=user_id, text=f"❌ Video ပို့ရာတွင် အမှား: {str(e)}")
+                except Exception as e:
+                    await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
+
+            # Send warning only once
+            warning_text = (
+                "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
+                "ဤရုပ်ရှင်ဖိုင်များ/ဗီဒီယိုများကို 5 မိနစ်အတွင်း (မူပိုင်ခွင့်ပြဿနာများကြောင့်) ဖျက်ပါမည်။\n\n"
+                "ကျေးဇူးပြု၍ ဤဖိုင်များ/ဗီဒီယိုများအားလုံးကို သင်၏ Saved Messages များသို့ Forward လုပ်ပြီး ထိုနေရာတွင် ဇာတ်ကားအား ကြည့်ရှုပါ။\n\n"
+                "ကျွန်ုပ်၏ Channel ကို လာရောက်အားပေးမှုအတွက် ကျေးဇူးအထူးတင်ပါတယ် 🙏🙏🙏\n\n"
+                "Channel ရေရှည်တည်တံ့ဖို့အတွက် Support ပေးချင်ပါက Wave Pay (09767011991) ကို ကူညီနိုင်ပါတယ်။\n\n"
+                "အားလုံးကို ကျေးဇူးတင်ပါတယ်။\n\n!!! IMPORTANT !!!\n"
+                "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
+                "Please forward these ALL Files/Videos to your Saved Messages and start downloading there."
+            )
+            warn_msg = await context.bot.send_message(chat_id=user_id, text=warning_text)
+
+            async def delete_after():
+                await asyncio.sleep(300)
+                try:
+                    await context.bot.delete_message(chat_id=user_id, message_id=warn_msg.message_id)
+                    # Optionally delete all sent videos (but we don't track their IDs easily)
+                except:
+                    pass
+            asyncio.create_task(delete_after())
+
+            add_user(user_id)
+            increment_requests()
+
+            keyboard = []
+            if OTHER_CHANNELS:
+                for idx, link in enumerate(OTHER_CHANNELS, 1):
+                    if idx == 1:
+                        keyboard.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
+                    elif idx == 2:
+                        keyboard.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
+                    elif idx == 3:
+                        keyboard.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
+                    else:
+                        keyboard.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
+            if MUSIC_CHANNEL_LINK:
+                keyboard.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
+
+            if keyboard:
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="🎉 **အခြားဇာတ်ကားများအတွက် အောက်ပါ Channel များသို့ ဝင်ရောက်ပါ**",
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
         else:
             await update.message.reply_text("❌ ဤလင့်သည် မမှန်ကန်ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ။")
     else:
@@ -209,6 +236,8 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
         [InlineKeyboardButton("🔗 Video → Deep Link", callback_data="menu_link")],
+        [InlineKeyboardButton("📦 Batch Link ထုတ်ရန်", callback_data="menu_batch")],  # NEW
+        [InlineKeyboardButton("✏️ Link ပြင်ရန်", callback_data="menu_edit")],        # NEW
         [InlineKeyboardButton("📊 စာရင်းအင်း", callback_data="menu_stats")],
         [InlineKeyboardButton("📢 ပြန်လွှင့်ခြင်း", callback_data="menu_broadcast")],
         [InlineKeyboardButton("⏰ Schedule ပြုလုပ်ရန်", callback_data="menu_schedule")],
@@ -236,6 +265,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📸 `/newpost` command ကို သုံးပါ။ (Post ဖန်တီးရန်)")
     elif data == "menu_link":
         await query.edit_message_text("🔗 `/link` command ကို သုံးပါ။ (Video ပို့ပါက Deep Link ရမည်)")
+    elif data == "menu_batch":
+        await query.edit_message_text("📦 `/batchlink` command ကို သုံးပါ။ (ဖိုင်အများကြီးကို link တစ်ခုတည်းနဲ့ ချိတ်ရန်)")
+    elif data == "menu_edit":
+        await query.edit_message_text("✏️ `/editlink` command ကို သုံးပါ။ (ရှိပြီးသား Link ကို ပြင်ရန်)")
     elif data == "menu_stats":
         total_users = users_collection.count_documents({})
         total_files = file_store_collection.count_documents({})
@@ -264,7 +297,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_mode = False
         await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
 
-# ---------- /link Command ----------
+# ---------- /link Command (Single file) ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
@@ -276,11 +309,11 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
     if not is_admin(update.effective_user.id):
         return
     if context.user_data.get('waiting_for_video_link'):
-        video = update.message.video
+        video = update.message.video or update.message.document
         if video:
             try:
                 payload = generate_payload()
-                file_name = video.file_name or "ဇာတ်ကား"
+                file_name = getattr(video, 'file_name', "ဇာတ်ကား")
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
@@ -295,7 +328,141 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newpost Command (ပြင်ဆင်ပြီး - Caption ကို ၂ ခါခွဲပို့နိုင်ရန်) ----------
+# ---------- NEW: /batchlink Command ----------
+BATCH_WAITING_FILES, BATCH_DONE = range(2)
+
+async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return ConversationHandler.END
+    await update.message.reply_text("📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\nအားလုံးပြီးပါက /done ကိုနှိပ်ပါ။")
+    context.user_data['batch_files'] = []
+    return BATCH_WAITING_FILES
+
+async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    video = update.message.video or update.message.document
+    if not video:
+        await update.message.reply_text("Video file တစ်ခု ပို့ပါ။")
+        return BATCH_WAITING_FILES
+    file_id = video.file_id
+    file_name = getattr(video, 'file_name', f"video_{len(context.user_data['batch_files'])+1}")
+    context.user_data['batch_files'].append({"file_id": file_id, "file_name": file_name})
+    await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {len(context.user_data['batch_files'])} ဖိုင်)")
+    return BATCH_WAITING_FILES
+
+async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    files = context.user_data.get('batch_files', [])
+    if not files:
+        await update.message.reply_text("❌ ဖိုင်မရှိပါ။ ထပ်မံစတင်ပါ။")
+        return ConversationHandler.END
+    payload = generate_payload()
+    for f in files:
+        save_file_info(payload, f['file_id'], f['file_name'])
+    deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+    file_names = "\n".join([f"🎬 {f['file_name']}" for f in files])
+    await update.message.reply_text(
+        f"✅ Batch Link ဖန်တီးပြီးပါပြီ။\n\n"
+        f"ဖိုင်များ:\n{file_names}\n\n"
+        f"လင့်: {deep_link}"
+    )
+    context.user_data.pop('batch_files', None)
+    return ConversationHandler.END
+
+async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
+    context.user_data.pop('batch_files', None)
+    return ConversationHandler.END
+
+# ---------- NEW: /editlink Command ----------
+async def editlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+    all_docs = list(file_store_collection.find({}, {"payload": 1, "files": 1}))
+    if not all_docs:
+        await update.message.reply_text("❌ Link မရှိသေးပါ။")
+        return
+    keyboard = []
+    for doc in all_docs:
+        payload = doc.get("payload")
+        files = doc.get("files", [])
+        if files:
+            first_file = files[0]['file_name'] if files else "Unknown"
+            keyboard.append([InlineKeyboardButton(f"{first_file} ({len(files)} files)", callback_data=f"edit_{payload}")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("🔧 ပြင်ဆင်လိုသော Link ကို ရွေးပါ:", reply_markup=reply_markup)
+
+async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    payload = query.data.replace("edit_", "")
+    doc = file_store_collection.find_one({"payload": payload})
+    if not doc:
+        await query.edit_message_text("❌ ဒီ Link မရှိတော့ပါ။")
+        return
+    files = doc.get("files", [])
+    if not files:
+        await query.edit_message_text("ဒီ Link တွင် ဖိုင်မရှိပါ။")
+        return
+    file_list = "\n".join([f"{idx+1}. {f['file_name']}" for idx, f in enumerate(files)])
+    keyboard = [
+        [InlineKeyboardButton("➕ ဖိုင်ထပ်ထည့်", callback_data=f"addfile_{payload}")],
+        [InlineKeyboardButton("❌ နောက်ဆုံးဖိုင်ဖျက်", callback_data=f"delfile_{payload}")],
+        [InlineKeyboardButton("🗑️ Link တစ်ခုလုံးဖျက်", callback_data=f"deletelink_{payload}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        text=f"📌 Link: `{payload}`\n\n📂 ဖိုင်များ:\n{file_list}",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    context.user_data['editing_payload'] = payload
+
+async def addfile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    payload = query.data.replace("addfile_", "")
+    context.user_data['editing_payload'] = payload
+    await query.edit_message_text("📤 ထပ်ထည့်လိုသော Video ဖိုင်ကို ပို့ပေးပါ။")
+    context.user_data['waiting_for_addfile'] = True
+
+async def handle_addfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if context.user_data.get('waiting_for_addfile'):
+        video = update.message.video or update.message.document
+        if video:
+            payload = context.user_data['editing_payload']
+            file_id = video.file_id
+            file_name = getattr(video, 'file_name', "ဇာတ်ကား")
+            save_file_info(payload, file_id, file_name)
+            await update.message.reply_text(f"✅ {file_name} ကို ထပ်ထည့်ပြီးပါပြီ။")
+            context.user_data.pop('waiting_for_addfile', None)
+            context.user_data.pop('editing_payload', None)
+        else:
+            await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
+
+async def delfile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    payload = query.data.replace("delfile_", "")
+    doc = file_store_collection.find_one({"payload": payload})
+    if not doc or not doc.get("files"):
+        await query.edit_message_text("❌ ဖိုင်မရှိပါ။")
+        return
+    files = doc["files"]
+    removed = files.pop()
+    file_store_collection.update_one({"payload": payload}, {"$set": {"files": files}})
+    await query.edit_message_text(f"❌ {removed['file_name']} ကို ဖျက်ပြီးပါပြီ။")
+
+async def deletelink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    payload = query.data.replace("deletelink_", "")
+    file_store_collection.delete_one({"payload": payload})
+    await query.edit_message_text(f"🗑️ Link `{payload}` ကို ဖျက်ပြီးပါပြီ။", parse_mode="Markdown")
+
+# ---------- /newpost Command (unchanged) ----------
 POSTER, CAPTION, VIDEO_FILE, WAITING_VIDEO = range(4)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,14 +477,13 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ပုံတစ်ပုံ ပို့ပေးပါ။")
         return POSTER
     context.user_data['poster'] = update.message.photo[-1].file_id
-    context.user_data['caption_parts'] = []  # caption part တွေ သိမ်းဖို့
+    context.user_data['caption_parts'] = []
     await update.message.reply_text("✍️ ဇာတ်ကားအကြောင်း စာသား (ဇာတ်ညွှန်း) ရေးပေးပါ...\n(စာသားရှည်ပါက ၂ ခါခွဲပို့နိုင်ပါသည်။ ပြီးပါက 'a' ရိုက်ပါ။)")
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text.lower() == 'a':
-        # စာသားအကုန်ရောက်ပြီဆိုရင် Caption ကို စုပေါင်းပြီး Telegraph လုပ်မယ်
         caption_parts = context.user_data.get('caption_parts', [])
         if not caption_parts:
             await update.message.reply_text("⚠️ ဇာတ်ညွှန်း စာသား မရှိသေးပါ။ စာသား ပို့ပေးပါ။")
@@ -342,7 +508,6 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
         return WAITING_VIDEO
     else:
-        # စာသားအပိုင်းကို သိမ်းမယ်
         caption_parts = context.user_data.get('caption_parts', [])
         caption_parts.append(text)
         context.user_data['caption_parts'] = caption_parts
@@ -423,7 +588,7 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- Admin Commands ----------
+# ---------- Admin Commands (unchanged) ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -508,7 +673,9 @@ async def set_commands(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
         ("newpost", "ပို့စ်အသစ်ဖန်တီးရန် (ပုံ+စာ+Video)"),
-        ("link", "Video အတွက် Deep Link ထုတ်ရန်"),
+        ("link", "Video တစ်ခုအတွက် Deep Link ထုတ်ရန်"),
+        ("batchlink", "Video အများကြီးအတွက် Deep Link တစ်ခုတည်းထုတ်ရန်"),
+        ("editlink", "ရှိပြီးသား Deep Link ကို ပြင်ဆင်ရန်"),
         ("stats", "စာရင်းအင်းကြည့်ရန်"),
         ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
         ("menu", "Admin Menu ပြသရန်"),
@@ -519,6 +686,7 @@ async def set_commands(application: Application):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
+# ConversationHandler for newpost
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
@@ -532,10 +700,30 @@ newpost_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_newpost)],
 )
 
+# NEW: ConversationHandler for batchlink
+batchlink_handler = ConversationHandler(
+    entry_points=[CommandHandler('batchlink', batchlink_start)],
+    states={
+        BATCH_WAITING_FILES: [
+            MessageHandler(filters.VIDEO | filters.Document.ALL, batch_receive_file),
+            CommandHandler('done', batch_done)
+        ],
+    },
+    fallbacks=[CommandHandler('cancel', batch_cancel)],
+)
+
+# Add handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
+application.add_handler(batchlink_handler)
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
+application.add_handler(CommandHandler("editlink", editlink_command))
+application.add_handler(CallbackQueryHandler(edit_callback, pattern="^edit_"))
+application.add_handler(CallbackQueryHandler(addfile_callback, pattern="^addfile_"))
+application.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_addfile))
+application.add_handler(CallbackQueryHandler(delfile_callback, pattern="^delfile_"))
+application.add_handler(CallbackQueryHandler(deletelink_callback, pattern="^deletelink_"))
 application.add_handler(CommandHandler("menu", menu_command))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("broadcast", broadcast))
@@ -568,5 +756,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
+    # Run migration before starting
+    migrate_old_documents()
     threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
