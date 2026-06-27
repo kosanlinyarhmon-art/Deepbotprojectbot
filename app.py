@@ -158,18 +158,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # Send all files in batch
+            # ============================================================
+            # >>>>>>>>>> ဒီနေရာကို ကျွန်တော် ပြင်ထားပါတယ် <<<<<<<<<<
+            # ============================================================
             for file_info in file_list:
                 file_id = file_info["file_id"]
-                file_name = file_info["file_name"]
+                file_name = file_info.get("file_name")
+                
+                # file_name ဗလာ/None ဖြစ်နေရင် fallback ပေးမယ်
+                if not file_name:
+                    file_name = "movie.mp4"
+                
+                # extension မပါရင် .mp4 ထပ်ထည့်မယ်
+                if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+                    file_name = file_name + ".mp4"
+                
                 try:
-                    await context.bot.send_video(
+                    # send_document သုံးပြီး filename= ထည့်လိုက်တယ် (မြန်မာစာပါရင်လည်း အဆင်ပြေတယ်)
+                    await context.bot.send_document(
                         chat_id=user_id,
-                        video=file_id,
+                        document=file_id,
+                        filename=file_name,
                         caption=f"🎬 {file_name}"
                     )
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
+            # ============================================================
 
             # Send warning only once
             warning_text = (
@@ -325,29 +339,56 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- NEW: /batchlink Command ----------
+# ---------- NEW: /batchlink Command (ဒီနေရာကို အထူးပြင်ဆင်ထားတယ်) ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
-    await update.message.reply_text("📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\nအားလုံးပြီးပါက /done ကိုနှိပ်ပါ။")
+    await update.message.reply_text(
+        "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
+        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းစီရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
+        "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
+    )
     context.user_data['batch_files'] = []
     return BATCH_WAITING_FILES
 
 async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
     video = update.message.video or update.message.document
     if not video:
         await update.message.reply_text("Video file တစ်ခု ပို့ပါ။")
         return BATCH_WAITING_FILES
+    
     file_id = video.file_id
-    file_name = getattr(video, 'file_name', f"video_{len(context.user_data['batch_files'])+1}")
-    context.user_data['batch_files'].append({"file_id": file_id, "file_name": file_name})
-    await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {len(context.user_data['batch_files'])} ဖိုင်)")
+    
+    # ၁။ ဖိုင်၏ မူလနာမည်ကို ဆွဲကြည့်
+    file_name = getattr(video, 'file_name', None)
+    
+    # ၂။ မူလနာမည်မရှိရင် Caption ထဲက စာသားကို နာမည်အဖြစ် သုံးမယ် (ဒါက ခင်ဗျားအတွက် အဓိက)
+    if not file_name or file_name.strip() == "":
+        if update.message.caption:
+            file_name = update.message.caption.strip()
+        else:
+            # Caption မှာလည်း မပါရင် fallback နာမည်ပေး
+            file_name = f"video_{len(context.user_data.get('batch_files', []))+1}.mp4"
+    
+    # ၃။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ် (Telegram က ဗီဒီယိုအဖြစ် သိစေဖို့)
+    if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+        file_name = file_name + ".mp4"
+    
+    batch_files = context.user_data.get('batch_files', [])
+    batch_files.append({"file_id": file_id, "file_name": file_name})
+    context.user_data['batch_files'] = batch_files
+    count = len(batch_files)
+    await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {count} ဖိုင်)")
     return BATCH_WAITING_FILES
 
 async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
     files = context.user_data.get('batch_files', [])
     if not files:
         await update.message.reply_text("❌ ဖိုင်မရှိပါ။ ထပ်မံစတင်ပါ။")
@@ -366,6 +407,8 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
     context.user_data.pop('batch_files', None)
     return ConversationHandler.END
