@@ -143,7 +143,7 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         logger.error(f"Telegraph error: {e}")
         return None
 
-# ---------- UPDATED Start Handler (supports batch files & Myanmar names) ----------
+# ---------- UPDATED Start Handler (send_document with filename) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -158,6 +158,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
+            # ============================================================
+            # >>>>>>>>>> ဒီနေရာကို ပြင်ထားပါတယ် (send_video -> send_document) <<<<<<<<<<
+            # ============================================================
             for file_info in file_list:
                 file_id = file_info["file_id"]
                 file_name = file_info.get("file_name")
@@ -174,6 +177,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
+            # ============================================================
 
             warning_text = (
                 "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
@@ -296,7 +300,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_mode = False
         await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
 
-# ---------- /link Command (Single file) ----------
+# ---------- /link Command ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
@@ -327,7 +331,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- UPDATED /batchlink Command (ဒီနေရာကို အထူးပြင်ဆင်ထားတယ်) ----------
+# ---------- UPDATED /batchlink Command (FIXED: Caption as filename) ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,7 +340,7 @@ async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await update.message.reply_text(
         "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
-        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
+        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းစီရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
         "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
     )
     context.user_data['batch_files'] = []
@@ -352,10 +356,14 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     file_id = video.file_id
 
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    # >>>>>>> ဒီနေရာကို အထူးပြင်ထားပါတယ် (Caption ကို ဦးစားပေးသိမ်းတယ်) <<<<<<
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     # ၁။ ဖိုင်၏ မူလနာမည်ကို ဆွဲကြည့်
     file_name = getattr(video, 'file_name', None)
 
     # ၂။ မူလနာမည်မရှိရင် Caption ထဲက စာသားကို နာမည်အဖြစ် သုံးမယ် (ဒါက ခင်ဗျားအတွက် အဓိက)
+    #     ပြီးတော့ ခင်ဗျား Forward လုပ်ထားတဲ့ ဖိုင်တွေမှာ Caption ထဲမှာ နာမည်ရှိတယ်ဆိုရင် အဲဒါကို ယူမယ်
     if not file_name or file_name.strip() == "":
         if update.message.caption:
             file_name = update.message.caption.strip()
@@ -367,6 +375,7 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # ၃။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ် (Telegram က ဗီဒီယိုအဖြစ် သိစေဖို့)
     if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
         file_name = file_name + ".mp4"
+    # ========================================================================
 
     batch_files = context.user_data.get('batch_files', [])
     batch_files.append({"file_id": file_id, "file_name": file_name})
@@ -402,7 +411,7 @@ async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('batch_files', None)
     return ConversationHandler.END
 
-# ---------- /newpost Command (unchanged) ----------
+# ---------- /newpost Command ----------
 POSTER, CAPTION, VIDEO_FILE, WAITING_VIDEO = range(4)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -625,7 +634,6 @@ async def set_commands(application: Application):
 # ---------- Application ----------
 application = Application.builder().token(TOKEN).build()
 
-# ConversationHandler for newpost
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
     states={
@@ -639,7 +647,6 @@ newpost_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_newpost)],
 )
 
-# ConversationHandler for batchlink
 batchlink_handler = ConversationHandler(
     entry_points=[CommandHandler('batchlink', batchlink_start)],
     states={
@@ -651,7 +658,6 @@ batchlink_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', batch_cancel)],
 )
 
-# Add handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
 application.add_handler(batchlink_handler)
