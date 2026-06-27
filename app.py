@@ -356,14 +356,10 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     file_id = video.file_id
 
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # >>>>>>> ဒီနေရာကို အထူးပြင်ထားပါတယ် (Caption ကို ဦးစားပေးသိမ်းတယ်) <<<<<<
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     # ၁။ ဖိုင်၏ မူလနာမည်ကို ဆွဲကြည့်
     file_name = getattr(video, 'file_name', None)
 
     # ၂။ မူလနာမည်မရှိရင် Caption ထဲက စာသားကို နာမည်အဖြစ် သုံးမယ် (ဒါက ခင်ဗျားအတွက် အဓိက)
-    #     ပြီးတော့ ခင်ဗျား Forward လုပ်ထားတဲ့ ဖိုင်တွေမှာ Caption ထဲမှာ နာမည်ရှိတယ်ဆိုရင် အဲဒါကို ယူမယ်
     if not file_name or file_name.strip() == "":
         if update.message.caption:
             file_name = update.message.caption.strip()
@@ -372,10 +368,9 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
             batch_files = context.user_data.get('batch_files', [])
             file_name = f"video_{len(batch_files) + 1}.mp4"
 
-    # ၃။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ် (Telegram က ဗီဒီယိုအဖြစ် သိစေဖို့)
+    # ၃။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ်
     if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
         file_name = file_name + ".mp4"
-    # ========================================================================
 
     batch_files = context.user_data.get('batch_files', [])
     batch_files.append({"file_id": file_id, "file_name": file_name})
