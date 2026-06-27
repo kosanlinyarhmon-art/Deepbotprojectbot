@@ -158,15 +158,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # ============================================================
-            # >>>>>>>>>> ဒီနေရာကို ပြင်ထားပါတယ် (send_video -> send_document) <<<<<<<<<<
-            # ============================================================
             for file_info in file_list:
                 file_id = file_info["file_id"]
                 file_name = file_info.get("file_name")
                 if not file_name:
                     file_name = "movie.mp4"
-                # extension မပါရင် .mp4 ထပ်ထည့်မယ်
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
                 try:
@@ -178,9 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
-            # ============================================================
 
-            # Send warning only once
             warning_text = (
                 "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
                 "ဤရုပ်ရှင်ဖိုင်များ/ဗီဒီယိုများကို 5 မိနစ်အတွင်း (မူပိုင်ခွင့်ပြဿနာများကြောင့်) ဖျက်ပါမည်။\n\n"
@@ -333,14 +327,18 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- UPDATED /batchlink Command (Myanmar name from caption) ----------
+# ---------- UPDATED /batchlink Command (ဒီနေရာကို အထူးပြင်ဆင်ထားတယ်) ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
-    await update.message.reply_text("📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n**အရေးကြီး:** ဖိုင်တစ်ခုချင်းရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\nအားလုံးပြီးပါက /done ကိုနှိပ်ပါ။")
+    await update.message.reply_text(
+        "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
+        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
+        "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
+    )
     context.user_data['batch_files'] = []
     return BATCH_WAITING_FILES
 
