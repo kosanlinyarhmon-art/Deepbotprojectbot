@@ -62,7 +62,7 @@ def add_user(user_id):
 def get_all_users():
     return [doc["user_id"] for doc in users_collection.find({}, {"user_id": 1})]
 
-# ---------- NEW: MongoDB structure for batch files ----------
+# ---------- MongoDB structure for batch files ----------
 def save_file_info(payload, file_id, file_name):
     doc = file_store_collection.find_one({"payload": payload})
     if doc:
@@ -83,7 +83,7 @@ def get_file_info(payload):
     doc = file_store_collection.find_one({"payload": payload})
     return doc.get("files", []) if doc else []
 
-# ---------- NEW: Migration for old documents ----------
+# ---------- Migration for old documents ----------
 def migrate_old_documents():
     docs = file_store_collection.find({"files": {"$exists": False}})
     for doc in docs:
@@ -143,13 +143,13 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         logger.error(f"Telegraph error: {e}")
         return None
 
-# ---------- UPDATED Start Handler (supports batch files) ----------
+# ---------- UPDATED Start Handler (supports batch files & Myanmar names) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if context.args and len(context.args) > 0:
         payload = context.args[0]
-        file_list = get_file_info(payload)  # returns list
+        file_list = get_file_info(payload)
         if file_list:
             if not await is_member(user_id, context):
                 await update.message.reply_text(
@@ -159,22 +159,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             # ============================================================
-            # >>>>>>>>>> ဒီနေရာကို ကျွန်တော် ပြင်ထားပါတယ် <<<<<<<<<<
+            # >>>>>>>>>> ဒီနေရာကို ပြင်ထားပါတယ် (send_video -> send_document) <<<<<<<<<<
             # ============================================================
             for file_info in file_list:
                 file_id = file_info["file_id"]
                 file_name = file_info.get("file_name")
-                
-                # file_name ဗလာ/None ဖြစ်နေရင် fallback ပေးမယ်
                 if not file_name:
                     file_name = "movie.mp4"
-                
                 # extension မပါရင် .mp4 ထပ်ထည့်မယ်
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
-                
                 try:
-                    # send_document သုံးပြီး filename= ထည့်လိုက်တယ် (မြန်မာစာပါရင်လည်း အဆင်ပြေတယ်)
                     await context.bot.send_document(
                         chat_id=user_id,
                         document=file_id,
@@ -202,7 +197,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(300)
                 try:
                     await context.bot.delete_message(chat_id=user_id, message_id=warn_msg.message_id)
-                    # Optionally delete all sent videos (but we don't track their IDs easily)
                 except:
                     pass
             asyncio.create_task(delete_after())
@@ -245,7 +239,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-# ---------- Admin Menu (မြန်မာလို - "✏️ Link ပြင်ရန်" မပါ) ----------
+# ---------- Admin Menu ----------
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 ပို့စ်အသစ်", callback_data="menu_newpost")],
@@ -339,18 +333,14 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- NEW: /batchlink Command (ဒီနေရာကို အထူးပြင်ဆင်ထားတယ်) ----------
+# ---------- UPDATED /batchlink Command (Myanmar name from caption) ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
-    await update.message.reply_text(
-        "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
-        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းစီရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
-        "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
-    )
+    await update.message.reply_text("📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n**အရေးကြီး:** ဖိုင်တစ်ခုချင်းရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\nအားလုံးပြီးပါက /done ကိုနှိပ်ပါ။")
     context.user_data['batch_files'] = []
     return BATCH_WAITING_FILES
 
@@ -361,24 +351,25 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not video:
         await update.message.reply_text("Video file တစ်ခု ပို့ပါ။")
         return BATCH_WAITING_FILES
-    
+
     file_id = video.file_id
-    
+
     # ၁။ ဖိုင်၏ မူလနာမည်ကို ဆွဲကြည့်
     file_name = getattr(video, 'file_name', None)
-    
+
     # ၂။ မူလနာမည်မရှိရင် Caption ထဲက စာသားကို နာမည်အဖြစ် သုံးမယ် (ဒါက ခင်ဗျားအတွက် အဓိက)
     if not file_name or file_name.strip() == "":
         if update.message.caption:
             file_name = update.message.caption.strip()
         else:
             # Caption မှာလည်း မပါရင် fallback နာမည်ပေး
-            file_name = f"video_{len(context.user_data.get('batch_files', []))+1}.mp4"
-    
+            batch_files = context.user_data.get('batch_files', [])
+            file_name = f"video_{len(batch_files) + 1}.mp4"
+
     # ၃။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ် (Telegram က ဗီဒီယိုအဖြစ် သိစေဖို့)
     if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
         file_name = file_name + ".mp4"
-    
+
     batch_files = context.user_data.get('batch_files', [])
     batch_files.append({"file_id": file_id, "file_name": file_name})
     context.user_data['batch_files'] = batch_files
@@ -539,7 +530,7 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- Admin Commands (unchanged) ----------
+# ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -619,7 +610,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_menu(update, context)
 
-# ---------- Set Bot Commands for Telegram Menu (editlink မပါ) ----------
+# ---------- Set Bot Commands ----------
 async def set_commands(application: Application):
     await application.bot.set_my_commands([
         ("start", "Bot ကိုစတင်ရန်"),
