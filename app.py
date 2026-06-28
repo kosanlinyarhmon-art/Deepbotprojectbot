@@ -4,6 +4,7 @@ import threading
 import logging
 import sys
 import secrets
+import re
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -143,7 +144,7 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         logger.error(f"Telegraph error: {e}")
         return None
 
-# ---------- UPDATED Start Handler (send_document with filename) ----------
+# ---------- Start Handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -158,14 +159,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # ============================================================
-            # >>>>>>>>>> ဒီနေရာကို ပြင်ထားပါတယ် (send_video -> send_document) <<<<<<<<<<
-            # ============================================================
             for file_info in file_list:
                 file_id = file_info["file_id"]
                 file_name = file_info.get("file_name")
                 if not file_name:
                     file_name = "movie.mp4"
+                # Clean up the name: remove extra newlines and ensure .mp4
+                file_name = re.sub(r'\s+', ' ', file_name).strip()
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
                 try:
@@ -177,7 +177,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
-            # ============================================================
 
             warning_text = (
                 "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
@@ -331,7 +330,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- UPDATED /batchlink Command (FIXED: Caption as filename) ----------
+# ---------- UPDATED /batchlink Command (FIXED: Always use caption, ignore original filename) ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -340,7 +339,7 @@ async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await update.message.reply_text(
         "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
-        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းစီရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
+        "**အရေးကြီး:** ဖိုင်တစ်ခုချင်းရဲ့ Caption မှာ မြန်မာလိုနာမည်ကို ရိုက်ထည့်ပေးပါ။\n"
         "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
     )
     context.user_data['batch_files'] = []
@@ -356,21 +355,23 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     file_id = video.file_id
 
-    # ၁။ ဖိုင်၏ မူလနာမည်ကို ဆွဲကြည့်
-    file_name = getattr(video, 'file_name', None)
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    # >>>>>>> ဒီနေရာကို အထူးပြင်ထားပါတယ် - Caption ကိုပဲ သုံးမယ်၊ မူလနာမည်ကို လုံးဝမသုံးတော့ဘူး <<<<<<
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    # ၁။ Caption ကို ဦးစားပေးယူမယ်
+    caption = update.message.caption
+    if caption:
+        # Clean up: remove extra newlines, multiple spaces
+        file_name = re.sub(r'\s+', ' ', caption).strip()
+    else:
+        # Caption မပါရင် fallback နာမည်ပေး
+        batch_files = context.user_data.get('batch_files', [])
+        file_name = f"video_{len(batch_files) + 1}"
 
-    # ၂။ မူလနာမည်မရှိရင် Caption ထဲက စာသားကို နာမည်အဖြစ် သုံးမယ် (ဒါက ခင်ဗျားအတွက် အဓိက)
-    if not file_name or file_name.strip() == "":
-        if update.message.caption:
-            file_name = update.message.caption.strip()
-        else:
-            # Caption မှာလည်း မပါရင် fallback နာမည်ပေး
-            batch_files = context.user_data.get('batch_files', [])
-            file_name = f"video_{len(batch_files) + 1}.mp4"
-
-    # ၃။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ်
+    # ၂။ နာမည်ရဲ့အဆုံးမှာ .mp4 မပါရင် ထပ်ထည့်ပေးမယ်
     if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
         file_name = file_name + ".mp4"
+    # ========================================================================
 
     batch_files = context.user_data.get('batch_files', [])
     batch_files.append({"file_id": file_id, "file_name": file_name})
