@@ -144,15 +144,16 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         logger.error(f"Telegraph error: {e}")
         return None
 
-# ---------- FIXED: Helper function to get filename - ALWAYS use original filename ----------
-def get_video_name(video, caption=None, fallback="movie.mp4"):
-    """Get video name: ALWAYS use original filename first, then caption if no filename, then fallback"""
-    # ၁။ မူလဖိုင်နာမည်ကို အရင်ယူမယ် (ဒါက အရေးကြီးဆုံး)
-    original = getattr(video, 'file_name', None)
-    if original:
-        return original.strip()
-    
-    # ၂။ မူလဖိုင်နာမည်မရှိရင် Caption ကိုယူမယ်
+# ---------- ===================== CRITICAL: UNIFIED FILENAME FUNCTION ===================== ----------
+def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4"):
+    """
+    UNIFIED function to get video name with priority:
+    1. Caption (from video message)
+    2. Original filename (from video file)
+    3. Poster caption (first line, for /newpost)
+    4. Fallback
+    """
+    # ၁။ Caption ကို ဦးစားပေးယူမယ်
     if caption:
         name = re.sub(r'\s+', ' ', caption).strip()
         if name:
@@ -160,7 +161,26 @@ def get_video_name(video, caption=None, fallback="movie.mp4"):
                 name = name + ".mp4"
             return name
     
-    # ၃။ နှစ်ခုလုံးမရှိရင် fallback
+    # ၂။ Caption မပါရင် မူလဖိုင်နာမည်ကိုယူမယ်
+    original = getattr(video, 'file_name', None)
+    if original:
+        name = original.strip()
+        if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+            name = name + ".mp4"
+        return name
+    
+    # ၃။ Poster caption ကနေယူမယ် (/newpost အတွက်)
+    if poster_caption:
+        lines = poster_caption.strip().split('\n')
+        name = lines[0].strip()
+        if name:
+            if len(name) > 100:
+                name = name[:97] + "..."
+            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+                name = name + ".mp4"
+            return name
+    
+    # ၄။ အကုန်မရှိရင် fallback
     return fallback
 
 # ---------- Start Handler ----------
@@ -183,7 +203,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_name = file_info.get("file_name")
                 if not file_name:
                     file_name = "movie.mp4"
-                # Clean up the name
                 file_name = re.sub(r'\s+', ' ', file_name).strip()
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
@@ -318,12 +337,12 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_mode = False
         await query.edit_message_text("🔊 Maintenance mode ပိတ်ထားပါသည်။")
 
-# ---------- /link Command (FIXED: Use original filename first) ----------
+# ---------- ===================== /link Command ===================== ----------
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။\nCaption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။")
     context.user_data['waiting_for_video_link'] = True
 
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -334,9 +353,8 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         if video:
             try:
                 payload = generate_payload()
-                # Use original filename first, then caption as fallback
                 caption = update.message.caption
-                file_name = get_video_name(video, caption, "ဇာတ်ကား")
+                file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
@@ -351,12 +369,12 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /newfile Command (FIXED: Use original filename first) ----------
+# ---------- ===================== /newfile Command ===================== ----------
 async def newfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။")
+    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။\nCaption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။")
     context.user_data['waiting_for_newfile'] = True
 
 async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -368,7 +386,7 @@ async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT
             try:
                 payload = generate_payload()
                 caption = update.message.caption
-                file_name = get_video_name(video, caption, "ဇာတ်ကား")
+                file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
                 save_file_info(payload, video.file_id, file_name)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
@@ -383,7 +401,7 @@ async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT
         else:
             await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
 
-# ---------- /batchlink Command (FIXED: Use original filename first) ----------
+# ---------- ===================== /batchlink Command ===================== ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -392,6 +410,7 @@ async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await update.message.reply_text(
         "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
+        "Caption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။\n"
         "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
     )
     context.user_data['batch_files'] = []
@@ -407,7 +426,7 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     file_id = video.file_id
     caption = update.message.caption
-    file_name = get_video_name(video, caption, f"video_{len(context.user_data.get('batch_files', [])) + 1}")
+    file_name = get_video_name(video, caption, None, f"video_{len(context.user_data.get('batch_files', [])) + 1}")
 
     batch_files = context.user_data.get('batch_files', [])
     batch_files.append({"file_id": file_id, "file_name": file_name})
@@ -443,7 +462,7 @@ async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('batch_files', None)
     return ConversationHandler.END
 
-# ---------- /newpost Command (FIXED: Use original filename first) ----------
+# ---------- ===================== /newpost Command ===================== ----------
 POSTER, CAPTION, VIDEO_FILE, WAITING_VIDEO = range(4)
 
 async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,7 +505,7 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Telegraph error: {e}")
                 await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
 
-        await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...")
+        await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...\n(ဗီဒီယိုဖိုင်ရဲ့ Caption မှာလည်း နာမည်ထည့်ပေးနိုင်ပါတယ်)")
         return WAITING_VIDEO
     else:
         caption_parts = context.user_data.get('caption_parts', [])
@@ -507,20 +526,9 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         return WAITING_VIDEO
 
     try:
-        # FIXED: Use original filename first
         caption = update.message.caption
-        file_name = get_video_name(video, caption, "ဇာတ်ကား")
-
-        # If still no name (shouldn't happen with get_video_name), use poster caption
-        if not file_name or file_name == "movie.mp4":
-            caption_full = context.user_data.get('caption_full', '')
-            if caption_full:
-                lines = caption_full.strip().split('\n')
-                file_name = lines[0].strip()
-                if len(file_name) > 100:
-                    file_name = file_name[:97] + "..."
-            else:
-                file_name = "ဇာတ်ကား"
+        poster_caption = context.user_data.get('caption_full', '')
+        file_name = get_video_name(video, caption, poster_caption, "ဇာတ်ကား")
 
         payload = generate_payload()
         save_file_info(payload, video.file_id, file_name)
