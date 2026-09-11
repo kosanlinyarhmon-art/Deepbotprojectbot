@@ -845,7 +845,9 @@ def run_bot():
             asyncio.set_event_loop(loop)
             loop.run_until_complete(set_commands(application))
             logger.info("Starting bot polling...")
-            application.run_polling()
+            # drop_pending_updates: never replay stale queued updates after a
+            # restart, otherwise old forwarded movies get reposted/redelivered.
+            application.run_polling(drop_pending_updates=True)
         except Exception as e:
             logger.exception(f"Bot polling crashed: {e}. Restarting in 10s")
             import time
