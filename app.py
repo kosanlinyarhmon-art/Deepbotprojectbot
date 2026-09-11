@@ -599,7 +599,53 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
             f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
             f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
         )
-        await update.message.reply_text("✅ **Post ဖန်တီးပြီးပါပြီ။**\n\nဤ Post ကို Forward လုပ်ပြီး Channel မှာ တင်လိုက်ပါ။")
+
+        # Auto-post to the movie channels: poster photo + caption + buttons.
+        movie_posted = 0
+        movie_failed = []
+        for chat_id in POST_CHANNEL_IDS:
+            try:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=poster,
+                    caption=photo_caption,
+                    reply_markup=reply_markup,
+                )
+                movie_posted += 1
+            except Exception as e:
+                movie_failed.append(chat_id)
+                logger.error(f"Auto movie-channel post failed to {chat_id}: {e}")
+
+        # Auto-post the movie FILE itself to the database channel (bot's own copy).
+        db_posted = False
+        if DATABASE_CHANNEL_ID:
+            try:
+                db_chat = int(DATABASE_CHANNEL_ID.strip())
+                if update.message.video:
+                    await context.bot.send_video(
+                        chat_id=db_chat,
+                        video=video.file_id,
+                        caption=f"🎬 {file_name}",
+                        supports_streaming=True,
+                    )
+                else:
+                    await context.bot.send_document(
+                        chat_id=db_chat,
+                        document=video.file_id,
+                        filename=file_name,
+                        caption=f"🎬 {file_name}",
+                    )
+                db_posted = True
+            except Exception as e:
+                logger.error(f"Auto database-channel post failed: {e}")
+
+        summary = f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
+        summary += f"🎬 Movie channel {movie_posted}/{len(POST_CHANNEL_IDS)} ခုမှာ တင်ပြီးပါပြီ။\n"
+        if DATABASE_CHANNEL_ID:
+            summary += f"🗄️ Database channel မှာ movie ဖိုင် {'တင်ပြီးပါပြီ ✅' if db_posted else 'တင်၍မရပါ ❌'}။\n"
+        if movie_failed:
+            summary += f"⚠️ တင်၍မရတဲ့ channel: {', '.join(str(c) for c in movie_failed)}\n"
+        await update.message.reply_text(summary)
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
