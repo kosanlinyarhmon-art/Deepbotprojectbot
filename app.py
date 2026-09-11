@@ -111,9 +111,10 @@ ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",")
 
 # Channels where the bot posts forwarded movies itself (never as a forward).
 # CHANNEL_IDS = the movie channels; DATABASE_CHANNEL_ID = the private backup channel.
-CHANNEL_IDS = [int(id.strip()) for id in os.environ.get("CHANNEL_IDS", "").split(",") if id.strip()] if os.environ.get("CHANNEL_IDS") else ([int(CHANNEL_ID)] if CHANNEL_ID else [])
+
+MOVIE_CHANNEL_IDS = [int(id.strip()) for id in os.environ.get("CHANNEL_IDS", "").split(",") if id.strip()] if os.environ.get("CHANNEL_IDS") else ([int(CHANNEL_ID)] if CHANNEL_ID else [])
 DATABASE_CHANNEL_ID = os.environ.get("DATABASE_CHANNEL_ID", "")
-POST_CHANNEL_IDS = list(CHANNEL_IDS)
+POST_CHANNEL_IDS = list(MOVIE_CHANNEL_IDS)
 if DATABASE_CHANNEL_ID:
     _db_chat = int(DATABASE_CHANNEL_ID.strip())
     if _db_chat not in POST_CHANNEL_IDS:
@@ -603,7 +604,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         # Auto-post to the movie channels: poster photo + caption + buttons.
         movie_posted = 0
         movie_failed = []
-        for chat_id in POST_CHANNEL_IDS:
+        for chat_id in MOVIE_CHANNEL_IDS:
             try:
                 await context.bot.send_photo(
                     chat_id=chat_id,
@@ -640,7 +641,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
                 logger.error(f"Auto database-channel post failed: {e}")
 
         summary = f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
-        summary += f"🎬 Movie channel {movie_posted}/{len(POST_CHANNEL_IDS)} ခုမှာ တင်ပြီးပါပြီ။\n"
+        summary += f"🎬 Movie channel {movie_posted}/{len(MOVIE_CHANNEL_IDS)} ခုမှာ တင်ပြီးပါပြီ။\n"
         if DATABASE_CHANNEL_ID:
             summary += f"🗄️ Database channel မှာ movie ဖိုင် {'တင်ပြီးပါပြီ ✅' if db_posted else 'တင်၍မရပါ ❌'}။\n"
         if movie_failed:
