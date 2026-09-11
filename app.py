@@ -7,6 +7,7 @@ import secrets
 import re
 from datetime import datetime
 from flask import Flask
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 from telegram.helpers import create_deep_linked_url
@@ -108,6 +109,16 @@ MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
+# Channels where the bot posts forwarded movies itself (never as a forward).
+# CHANNEL_IDS = the movie channels; DATABASE_CHANNEL_ID = the private backup channel.
+CHANNEL_IDS = [int(id.strip()) for id in os.environ.get("CHANNEL_IDS", "").split(",") if id.strip()] if os.environ.get("CHANNEL_IDS") else ([int(CHANNEL_ID)] if CHANNEL_ID else [])
+DATABASE_CHANNEL_ID = os.environ.get("DATABASE_CHANNEL_ID", "")
+POST_CHANNEL_IDS = list(CHANNEL_IDS)
+if DATABASE_CHANNEL_ID:
+    _db_chat = int(DATABASE_CHANNEL_ID.strip())
+    if _db_chat not in POST_CHANNEL_IDS:
+        POST_CHANNEL_IDS.append(_db_chat)
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -198,6 +209,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
+            delivered_message_ids = []
+
             for file_info in file_list:
                 file_id = file_info["file_id"]
                 file_name = file_info.get("file_name")
@@ -207,12 +220,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
                 try:
-                    await context.bot.send_document(
+                    sent_file = await context.bot.send_document(
                         chat_id=user_id,
                         document=file_id,
                         filename=file_name,
                         caption=f"🎬 {file_name}"
                     )
+                    delivered_message_ids.append(sent_file.message_id)
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
 
@@ -230,10 +244,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             async def delete_after():
                 await asyncio.sleep(300)
-                try:
-                    await context.bot.delete_message(chat_id=user_id, message_id=warn_msg.message_id)
-                except:
-                    pass
+                tasks = []
+                for mid in delivered_message_ids:
+                    tasks.append(
+                        context.bot.delete_message(chat_id=user_id, message_id=mid)
+                    )
+                tasks.append(
+                    context.bot.delete_message(
+                        chat_id=user_id, message_id=warn_msg.message_id
+                    )
+                )
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                deleted = sum(1 for r in results if not isinstance(r, Exception))
+                logger.info(f"Auto-deleted {deleted}/{len(tasks)} delivered messages for user {user_id}")
             asyncio.create_task(delete_after())
 
             add_user(user_id)
@@ -588,6 +611,87 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
+# ---------- ===================== Forwarded Movie → Post to Channels ===================== ----------
+async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin forwards a movie → bot reposts it into every configured channel.
+
+    The bot posts its OWN copy (by file_id, not a Telegram forward), so the
+    database-channel copy survives even if the original source channel dies.
+    """
+    if not is_admin(update.effective_user.id):
+        return
+
+    msg = update.message
+    media = msg.video or msg.document
+    if not media:
+        await msg.reply_text("❌ Video / Document တစ်ခုကိုသာ forward လုပ်ပေးပါ။")
+        return
+
+    caption = remove_links(msg.caption or msg.text or "")
+    caption = await translate_to_myanmar(caption)
+    file_name = get_video_name(media, caption, None, "movie.mp4")
+
+    posted = []
+    errors = []
+    for chat_id in POST_CHANNEL_IDS:
+        try:
+            if msg.video:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=media.file_id,
+                    caption=caption or None,
+                    supports_streaming=True,
+                )
+            else:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=media.file_id,
+                    filename=file_name,
+                    caption=caption or None,
+                )
+            posted.append(chat_id)
+        except Exception as e:
+            errors.append(f"{chat_id}: {e}")
+            logger.error(f"Forwarded-post failed to {chat_id}: {e}")
+
+    if not posted:
+        await msg.reply_text("❌ Channel ထဲ မတင်နိုင်ပါ။ အားလုံး error ဖြစ်နေပါတယ်။")
+        return
+
+    reply = f"✅ Movie ကို channel {len(posted)} ခုထဲ တင်ပြီးပါပြီ!\n"
+    for chat_id in posted:
+        reply += f"   • {chat_id}\n"
+    if errors:
+        reply += f"\n⚠️ တင်၍မရတဲ့ channel: {len(errors)} ခု"
+    await msg.reply_text(reply)
+
+def remove_links(text: str) -> str:
+    if not text:
+        return text
+    text = re.sub(r"https?://[^\s]+", "", text)
+    text = re.sub(r"t\.me/[^\s]+", "", text)
+    text = re.sub(r"@\w+", "", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+async def translate_to_myanmar(text: str) -> str:
+    if not text or len(text.strip()) < 3:
+        return text
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                "https://api.mymemory.translated.net/get",
+                params={"q": text, "langpair": "auto|my"},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                translated = (data.get("responseData") or {}).get("translatedText", "")
+                if translated and not data.get("quotaFinished"):
+                    return translated.strip()
+    except Exception as e:
+        logger.warning(f"Translate failed: {e}")
+    return text
+
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -713,6 +817,7 @@ batchlink_handler = ConversationHandler(
 application.add_handler(CommandHandler("start", start))
 application.add_handler(newpost_handler)
 application.add_handler(batchlink_handler)
+application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
 application.add_handler(CommandHandler("link", link_command))
 application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
 application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_video_for_link))
