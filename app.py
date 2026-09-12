@@ -9,6 +9,7 @@ from datetime import datetime
 from flask import Flask
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
@@ -471,10 +472,36 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_file_info(payload, f['file_id'], f['file_name'])
     deep_link = create_deep_linked_url(BOT_USERNAME, payload)
     file_names = "\n".join([f"🎬 {f['file_name']}" for f in files])
+
+    datab_report = ""
+    if DATABASE_CHANNEL_ID:
+        db_chat = int(DATABASE_CHANNEL_ID.strip())
+        db_ok = 0
+        db_fail = []
+        for f in files:
+            try:
+                await context.bot.send_document(
+                    chat_id=db_chat,
+                    document=f['file_id'],
+                    filename=f['file_name'],
+                    caption=f"🎬 {f['file_name']}",
+                )
+                db_ok += 1
+            except TelegramError as e:
+                db_fail.append(f['file_name'])
+                logger.error(f"Batch DB post failed for {f['file_name']}: {e}")
+        datab_report = (
+            f"\n\n🗄️ Database channel: ဖိုင် {db_ok}/{len(files)} တင်ပြီး။"
+            + (f"\n⚠️ မတင်နိုင်တဲ့ဖိုင်များ: {', '.join(db_fail)}" if db_fail else "")
+        )
+    else:
+        datab_report = "\n\n⚠️ DATABASE_CHANNEL_ID မရှိပါ။";
+
     await update.message.reply_text(
         f"✅ Batch Link ဖန်တီးပြီးပါပြီ။\n\n"
         f"ဖိုင်များ:\n{file_names}\n\n"
         f"လင့်: {deep_link}"
+        f"{datab_report}"
     )
     context.user_data.pop('batch_files', None)
     return ConversationHandler.END
