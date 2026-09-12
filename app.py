@@ -556,7 +556,11 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Telegraph error: {e}")
                 await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
 
-        await update.message.reply_text("🎬 Video File ကို ပို့ပေးပါ...\n(ဗီဒီယိုဖိုင်ရဲ့ Caption မှာလည်း နာမည်ထည့်ပေးနိုင်ပါတယ်)")
+        await update.message.reply_text(
+            "🎬 Movie ဖိုင်များ ပို့ပေးပါ... (အများကြီးပို့နိုင်ပါသည်)\n"
+            "ဗီဒီယိုဖိုင်ရဲ့ Caption မှာ နာမည်ထည့်ပေးနိုင်ပါတယ်။\n"
+            "အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
+        )
         return WAITING_VIDEO
     else:
         caption_parts = context.user_data.get('caption_parts', [])
@@ -573,17 +577,42 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         video = update.message.document
 
     if not video:
-        await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ (video file သို့မဟုတ် video document)။")
+        if update.message.text and update.message.text.strip().lower() == 'a':
+            return await finalize_newpost(update, context)
+        await update.message.reply_text("🎬 Movie file ပို့ပါ သို့မဟုတ် အားလုံးပြီးပါက 'a' ရိုက်ပါ။")
+        return WAITING_VIDEO
+
+    caption = update.message.caption
+    poster_caption = context.user_data.get('caption_full', '')
+    file_name = get_video_name(video, caption, poster_caption, "ဇာတ်ကား")
+
+    videos = context.user_data.get('newpost_videos', [])
+    videos.append({
+        "file_id": video.file_id,
+        "file_name": file_name,
+        "is_video": bool(update.message.video),
+    })
+    context.user_data['newpost_videos'] = videos
+    await update.message.reply_text(
+        f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {len(videos)} ဖိုင်)\n"
+        f"နောက်ထပ် Movie ရှိလျှင် ထပ်ပို့ပါ။ အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
+    )
+    return WAITING_VIDEO
+
+
+async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    videos = context.user_data.get('newpost_videos', [])
+    if not videos:
+        await update.message.reply_text("Movie file တစ်ခုခု မပို့ရသေးပါ။ ဦးစွာ ပို့ပေးပါ။")
         return WAITING_VIDEO
 
     try:
-        caption = update.message.caption
-        poster_caption = context.user_data.get('caption_full', '')
-        file_name = get_video_name(video, caption, poster_caption, "ဇာတ်ကား")
-
         payload = generate_payload()
-        save_file_info(payload, video.file_id, file_name)
+        for v in videos:
+            save_file_info(payload, v['file_id'], v['file_name'])
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+        file_names = "\n".join([f"🎬 {v['file_name']}" for v in videos])
+        total = len(videos)
 
         buttons = []
         buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)])
@@ -611,6 +640,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 
         if not poster:
             await update.message.reply_text("ပုံ မတွေ့ပါ။ /newpost ကို ထပ်မံစတင်ပါ။")
+            context.user_data.clear()
             return ConversationHandler.END
 
         if telegraph_url:
@@ -624,7 +654,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(
             f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
             f"{deep_link}\n\n"
-            f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
+            f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် Movie {total} ဖိုင် အားလုံးကို ချက်ချင်းရရှိမည်။\n"
             f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
         )
 
@@ -644,35 +674,40 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
                 movie_failed.append(chat_id)
                 logger.error(f"Auto movie-channel post failed to {chat_id}: {e}")
 
-        # Auto-post the movie FILE itself to the database channel (bot's own copy).
-        db_posted = False
+        # Auto-post ALL movie files to the database channel (bot's own copies).
+        db_ok = 0
+        db_fail = []
         if DATABASE_CHANNEL_ID:
-            try:
-                db_chat = int(DATABASE_CHANNEL_ID.strip())
-                if update.message.video:
-                    await context.bot.send_video(
-                        chat_id=db_chat,
-                        video=video.file_id,
-                        caption=f"🎬 {file_name}",
-                        supports_streaming=True,
-                    )
-                else:
-                    await context.bot.send_document(
-                        chat_id=db_chat,
-                        document=video.file_id,
-                        filename=file_name,
-                        caption=f"🎬 {file_name}",
-                    )
-                db_posted = True
-            except Exception as e:
-                logger.error(f"Auto database-channel post failed: {e}")
+            db_chat = int(DATABASE_CHANNEL_ID.strip())
+            for v in videos:
+                try:
+                    if v.get('is_video'):
+                        await context.bot.send_video(
+                            chat_id=db_chat,
+                            video=v['file_id'],
+                            caption=f"🎬 {v['file_name']}",
+                            supports_streaming=True,
+                        )
+                    else:
+                        await context.bot.send_document(
+                            chat_id=db_chat,
+                            document=v['file_id'],
+                            filename=v['file_name'],
+                            caption=f"🎬 {v['file_name']}",
+                        )
+                    db_ok += 1
+                except Exception as e:
+                    db_fail.append(v['file_name'])
+                    logger.error(f"Auto database-channel post failed for {v['file_name']}: {e}")
 
         summary = f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
         summary += f"🎬 Movie channel {movie_posted}/{len(MOVIE_CHANNEL_IDS)} ခုမှာ တင်ပြီးပါပြီ။\n"
         if DATABASE_CHANNEL_ID:
-            summary += f"🗄️ Database channel မှာ movie ဖိုင် {'တင်ပြီးပါပြီ ✅' if db_posted else 'တင်၍မရပါ ❌'}။\n"
+            summary += f"🗄️ Database channel မှာ movie ဖိုင် {db_ok}/{total} တင်ပြီး။\n"
         if movie_failed:
             summary += f"⚠️ တင်၍မရတဲ့ channel: {', '.join(str(c) for c in movie_failed)}\n"
+        if db_fail:
+            summary += f"⚠️ DB တင်၍မရတဲ့ဖိုင်များ: {', '.join(db_fail)}\n"
         await update.message.reply_text(summary)
         context.user_data.clear()
         return ConversationHandler.END
@@ -871,7 +906,8 @@ newpost_handler = ConversationHandler(
         CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption)],
         WAITING_VIDEO: [
             MessageHandler(filters.VIDEO, receive_video_after_caption),
-            MessageHandler(filters.Document.ALL, receive_video_after_caption)
+            MessageHandler(filters.Document.ALL, receive_video_after_caption),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_video_after_caption)
         ],
     },
     fallbacks=[CommandHandler('cancel', cancel_newpost)],
