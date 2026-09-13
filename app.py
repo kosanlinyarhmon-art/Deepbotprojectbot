@@ -7,7 +7,6 @@ import secrets
 import re
 from datetime import datetime
 from flask import Flask
-import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
@@ -161,26 +160,27 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
 def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4"):
     """
     UNIFIED function to get video name with priority:
-    1. Caption (from video message)
-    2. Original filename (from video file)
+    1. Original filename (from video file) — the real name on the uploader's computer
+    2. Caption (from video message)
     3. Poster caption (first line, for /newpost)
     4. Fallback
     """
-    # ၁။ Caption ကို ဦးစားပေးယူမယ်
+    # ၁။ မူလဖိုင်နာမည်ကို ဦးစားပေးယူမယ် (computer ထဲမှာ save ထားတဲ့ နာမည်)
+    original = getattr(video, 'file_name', None)
+    if original:
+        name = re.sub(r'\s+', ' ', original).strip()
+        if name:
+            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+                name = name + ".mp4"
+            return name
+    
+    # ၂။ Original filename မရှိရင် caption ကိုယူမယ်
     if caption:
         name = re.sub(r'\s+', ' ', caption).strip()
         if name:
             if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                 name = name + ".mp4"
             return name
-    
-    # ၂။ Caption မပါရင် မူလဖိုင်နာမည်ကိုယူမယ်
-    original = getattr(video, 'file_name', None)
-    if original:
-        name = original.strip()
-        if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-            name = name + ".mp4"
-        return name
     
     # ၃။ Poster caption ကနေယူမယ် (/newpost အတွက်)
     if poster_caption:
@@ -452,9 +452,10 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     file_id = video.file_id
     caption = update.message.caption
     file_name = get_video_name(video, caption, None, f"video_{len(context.user_data.get('batch_files', [])) + 1}")
+    original_name = get_original_filename(video)
 
     batch_files = context.user_data.get('batch_files', [])
-    batch_files.append({"file_id": file_id, "file_name": file_name})
+    batch_files.append({"file_id": file_id, "file_name": file_name, "original_name": original_name})
     context.user_data['batch_files'] = batch_files
     count = len(batch_files)
     await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {count} ဖိုင်)")
@@ -483,8 +484,8 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(
                     chat_id=db_chat,
                     document=f['file_id'],
-                    filename=f['file_name'],
-                    caption=f"🎬 {f['file_name']}",
+                    filename=f.get('original_name') or f['file_name'],
+                    caption=None,
                 )
                 db_ok += 1
             except TelegramError as e:
@@ -585,11 +586,13 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     caption = update.message.caption
     poster_caption = context.user_data.get('caption_full', '')
     file_name = get_video_name(video, caption, poster_caption, "ဇာတ်ကား")
+    original_name = get_original_filename(video)
 
     videos = context.user_data.get('newpost_videos', [])
     videos.append({
         "file_id": video.file_id,
         "file_name": file_name,
+        "original_name": original_name,
         "is_video": bool(update.message.video),
     })
     context.user_data['newpost_videos'] = videos
@@ -685,15 +688,15 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_video(
                             chat_id=db_chat,
                             video=v['file_id'],
-                            caption=f"🎬 {v['file_name']}",
+                            caption=None,
                             supports_streaming=True,
                         )
                     else:
                         await context.bot.send_document(
                             chat_id=db_chat,
                             document=v['file_id'],
-                            filename=v['file_name'],
-                            caption=f"🎬 {v['file_name']}",
+                            filename=v.get('original_name') or v['file_name'],
+                            caption=None,
                         )
                     db_ok += 1
                 except Exception as e:
@@ -720,86 +723,60 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- ===================== Forwarded Movie → Post to Channels ===================== ----------
+# ---------- ===================== Forwarded Movie → Database Channel ===================== ----------
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin forwards a movie → bot reposts it into every configured channel.
+    """Anyone forwards a movie → bot stores it in the database channel.
 
     The bot posts its OWN copy (by file_id, not a Telegram forward), so the
-    database-channel copy survives even if the original source channel dies.
+    copy survives even if the original source channel is deleted. Only the
+    ORIGINAL filename is used (the name from the uploader's computer) and NO
+    caption is attached — no translation, no error captions.
     """
-    if not is_admin(update.effective_user.id):
-        return
-
     msg = update.message
     media = msg.video or msg.document
     if not media:
-        await msg.reply_text("❌ Video / Document တစ်ခုကိုသာ forward လုပ်ပေးပါ။")
         return
 
-    caption = remove_links(msg.caption or msg.text or "")
-    caption = await translate_to_myanmar(caption)
-    file_name = get_video_name(media, caption, None, "movie.mp4")
-
-    posted = []
-    errors = []
-    for chat_id in POST_CHANNEL_IDS:
-        try:
-            if msg.video:
-                await context.bot.send_video(
-                    chat_id=chat_id,
-                    video=media.file_id,
-                    caption=caption or None,
-                    supports_streaming=True,
-                )
-            else:
-                await context.bot.send_document(
-                    chat_id=chat_id,
-                    document=media.file_id,
-                    filename=file_name,
-                    caption=caption or None,
-                )
-            posted.append(chat_id)
-        except Exception as e:
-            errors.append(f"{chat_id}: {e}")
-            logger.error(f"Forwarded-post failed to {chat_id}: {e}")
-
-    if not posted:
-        await msg.reply_text("❌ Channel ထဲ မတင်နိုင်ပါ။ အားလုံး error ဖြစ်နေပါတယ်။")
+    if not DATABASE_CHANNEL_ID:
+        if is_admin(update.effective_user.id):
+            await msg.reply_text("⚠️ DATABASE_CHANNEL_ID မသတ်မှတ်ရသေးပါ။")
         return
 
-    reply = f"✅ Movie ကို channel {len(posted)} ခုထဲ တင်ပြီးပါပြီ!\n"
-    for chat_id in posted:
-        reply += f"   • {chat_id}\n"
-    if errors:
-        reply += f"\n⚠️ တင်၍မရတဲ့ channel: {len(errors)} ခု"
-    await msg.reply_text(reply)
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    file_name = get_original_filename(media)
 
-def remove_links(text: str) -> str:
-    if not text:
-        return text
-    text = re.sub(r"https?://[^\s]+", "", text)
-    text = re.sub(r"t\.me/[^\s]+", "", text)
-    text = re.sub(r"@\w+", "", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
-
-async def translate_to_myanmar(text: str) -> str:
-    if not text or len(text.strip()) < 3:
-        return text
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                "https://api.mymemory.translated.net/get",
-                params={"q": text, "langpair": "auto|my"},
+        if msg.video:
+            await context.bot.send_video(
+                chat_id=db_chat,
+                video=media.file_id,
+                caption=None,
+                supports_streaming=True,
             )
-            if r.status_code == 200:
-                data = r.json()
-                translated = (data.get("responseData") or {}).get("translatedText", "")
-                if translated and not data.get("quotaFinished"):
-                    return translated.strip()
+        else:
+            await context.bot.send_document(
+                chat_id=db_chat,
+                document=media.file_id,
+                filename=file_name,
+                caption=None,
+            )
+        if is_admin(update.effective_user.id):
+            await msg.reply_text(f"✅ Database channel မှာ တင်ပြီးပါပြီ။\n🔖 {file_name}")
     except Exception as e:
-        logger.warning(f"Translate failed: {e}")
-    return text
+        logger.error(f"Forwarded DB post failed: {e}")
+        if is_admin(update.effective_user.id):
+            await msg.reply_text(f"❌ Database channel မှာ တင်၍မရပါ: {str(e)}")
+
+def get_original_filename(media, fallback="movie.mp4"):
+    """Return the real filename as saved on the uploader's computer."""
+    name = getattr(media, 'file_name', None)
+    if name:
+        name = re.sub(r'\s+', ' ', name).strip()
+        if name:
+            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+                name = name + ".mp4"
+            return name
+    return fallback
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
