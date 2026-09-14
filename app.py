@@ -221,7 +221,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_name = re.sub(r'\s+', ' ', file_name).strip()
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
-                delivery_caption = file_info.get("file_caption") or f"🎬 {file_name}"
+                delivery_caption = clean_caption(file_info.get("file_caption") or f"🎬 {file_name}")
                 try:
                     sent_file = await context.bot.send_document(
                         chat_id=user_id,
@@ -482,11 +482,12 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_fail = []
         for f in files:
             try:
+                clean_cap = clean_caption(f.get('original_caption') or f"🎬 {f.get('original_name') or f['file_name']}")
                 await context.bot.send_document(
                     chat_id=db_chat,
                     document=f['file_id'],
                     filename=f.get('original_name') or f['file_name'],
-                    caption=f.get('original_caption') or f"🎬 {f.get('original_name') or f['file_name']}",
+                    caption=clean_cap,
                 )
                 db_ok += 1
             except TelegramError as e:
@@ -686,7 +687,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_chat = int(DATABASE_CHANNEL_ID.strip())
             for v in videos:
                 try:
-                    db_caption = v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}"
+                    db_caption = clean_caption(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
                     if v.get('is_video'):
                         await context.bot.send_video(
                             chat_id=db_chat,
@@ -747,7 +748,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     file_name = get_original_filename(media)
-    original_caption = msg.caption or ""
+    original_caption = clean_caption(msg.caption or "")
 
     try:
         if msg.video:
@@ -781,6 +782,14 @@ def get_original_filename(media, fallback="movie.mp4"):
                 name = name + ".mp4"
             return name
     return fallback
+
+def clean_caption(text):
+    """Remove dashes (-) from captions: 'A-B-C' -> 'A B C'."""
+    if not text:
+        return text
+    text = re.sub(r'\s*-\s*', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
