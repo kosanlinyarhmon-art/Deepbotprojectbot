@@ -455,7 +455,7 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     original_name = get_original_filename(video)
 
     batch_files = context.user_data.get('batch_files', [])
-    batch_files.append({"file_id": file_id, "file_name": file_name, "original_name": original_name})
+    batch_files.append({"file_id": file_id, "file_name": file_name, "original_name": original_name, "original_caption": caption or ""})
     context.user_data['batch_files'] = batch_files
     count = len(batch_files)
     await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {count} ဖိုင်)")
@@ -485,7 +485,7 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=db_chat,
                     document=f['file_id'],
                     filename=f.get('original_name') or f['file_name'],
-                    caption=None,
+                    caption=f.get('original_caption') or None,
                 )
                 db_ok += 1
             except TelegramError as e:
@@ -593,6 +593,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         "file_id": video.file_id,
         "file_name": file_name,
         "original_name": original_name,
+        "original_caption": caption or "",
         "is_video": bool(update.message.video),
     })
     context.user_data['newpost_videos'] = videos
@@ -688,7 +689,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_video(
                             chat_id=db_chat,
                             video=v['file_id'],
-                            caption=None,
+                            caption=v.get('original_caption') or None,
                             supports_streaming=True,
                         )
                     else:
@@ -696,7 +697,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=db_chat,
                             document=v['file_id'],
                             filename=v.get('original_name') or v['file_name'],
-                            caption=None,
+                            caption=v.get('original_caption') or None,
                         )
                     db_ok += 1
                 except Exception as e:
@@ -728,9 +729,9 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Anyone forwards a movie → bot stores it in the database channel.
 
     The bot posts its OWN copy (by file_id, not a Telegram forward), so the
-    copy survives even if the original source channel is deleted. Only the
-    ORIGINAL filename is used (the name from the uploader's computer) and NO
-    caption is attached — no translation, no error captions.
+    copy survives even if the original source channel is deleted. The ORIGINAL
+    caption (as typed by the uploader) is preserved — NO translation is applied,
+    so no error captions like "AUTO IS AN INVALID SOURCE LANGUAGE".
     """
     msg = update.message
     media = msg.video or msg.document
@@ -744,13 +745,14 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     file_name = get_original_filename(media)
+    original_caption = msg.caption or ""
 
     try:
         if msg.video:
             await context.bot.send_video(
                 chat_id=db_chat,
                 video=media.file_id,
-                caption=None,
+                caption=original_caption or None,
                 supports_streaming=True,
             )
         else:
@@ -758,7 +760,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=db_chat,
                 document=media.file_id,
                 filename=file_name,
-                caption=None,
+                caption=original_caption or None,
             )
         if is_admin(update.effective_user.id):
             await msg.reply_text(f"✅ Database channel မှာ တင်ပြီးပါပြီ။\n🔖 {file_name}")
