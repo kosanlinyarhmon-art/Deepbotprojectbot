@@ -65,12 +65,12 @@ def get_all_users():
     return [doc["user_id"] for doc in users_collection.find({}, {"user_id": 1})]
 
 # ---------- MongoDB structure for batch files ----------
-def save_file_info(payload, file_id, file_name):
+def save_file_info(payload, file_id, file_name, file_caption=None):
     doc = file_store_collection.find_one({"payload": payload})
     if doc:
         files = doc.get("files", [])
         if not any(f.get("file_id") == file_id for f in files):
-            files.append({"file_id": file_id, "file_name": file_name})
+            files.append({"file_id": file_id, "file_name": file_name, "file_caption": file_caption})
         file_store_collection.update_one(
             {"payload": payload},
             {"$set": {"files": files}}
@@ -78,7 +78,7 @@ def save_file_info(payload, file_id, file_name):
     else:
         file_store_collection.insert_one({
             "payload": payload,
-            "files": [{"file_id": file_id, "file_name": file_name}]
+            "files": [{"file_id": file_id, "file_name": file_name, "file_caption": file_caption}]
         })
 
 def get_file_info(payload):
@@ -221,12 +221,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_name = re.sub(r'\s+', ' ', file_name).strip()
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
+                delivery_caption = file_info.get("file_caption") or f"🎬 {file_name}"
                 try:
                     sent_file = await context.bot.send_document(
                         chat_id=user_id,
                         document=file_id,
                         filename=file_name,
-                        caption=f"🎬 {file_name}"
+                        caption=delivery_caption
                     )
                     delivered_message_ids.append(sent_file.message_id)
                 except Exception as e:
@@ -380,7 +381,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 payload = generate_payload()
                 caption = update.message.caption
                 file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-                save_file_info(payload, video.file_id, file_name)
+                save_file_info(payload, video.file_id, file_name, caption or None)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
@@ -412,7 +413,7 @@ async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT
                 payload = generate_payload()
                 caption = update.message.caption
                 file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-                save_file_info(payload, video.file_id, file_name)
+                save_file_info(payload, video.file_id, file_name, caption or None)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
@@ -470,7 +471,7 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     payload = generate_payload()
     for f in files:
-        save_file_info(payload, f['file_id'], f['file_name'])
+        save_file_info(payload, f['file_id'], f['file_name'], f.get('original_caption') or None)
     deep_link = create_deep_linked_url(BOT_USERNAME, payload)
     file_names = "\n".join([f"🎬 {f['file_name']}" for f in files])
 
@@ -613,7 +614,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         payload = generate_payload()
         for v in videos:
-            save_file_info(payload, v['file_id'], v['file_name'])
+            save_file_info(payload, v['file_id'], v['file_name'], v.get('original_caption') or None)
         deep_link = create_deep_linked_url(BOT_USERNAME, payload)
         file_names = "\n".join([f"🎬 {v['file_name']}" for v in videos])
         total = len(videos)
