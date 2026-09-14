@@ -485,7 +485,7 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=db_chat,
                     document=f['file_id'],
                     filename=f.get('original_name') or f['file_name'],
-                    caption=f.get('original_caption') or None,
+                    caption=f.get('original_caption') or f"🎬 {f.get('original_name') or f['file_name']}",
                 )
                 db_ok += 1
             except TelegramError as e:
@@ -685,11 +685,12 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_chat = int(DATABASE_CHANNEL_ID.strip())
             for v in videos:
                 try:
+                    db_caption = v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}"
                     if v.get('is_video'):
                         await context.bot.send_video(
                             chat_id=db_chat,
                             video=v['file_id'],
-                            caption=v.get('original_caption') or None,
+                            caption=db_caption,
                             supports_streaming=True,
                         )
                     else:
@@ -697,7 +698,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=db_chat,
                             document=v['file_id'],
                             filename=v.get('original_name') or v['file_name'],
-                            caption=v.get('original_caption') or None,
+                            caption=db_caption,
                         )
                     db_ok += 1
                 except Exception as e:
@@ -752,7 +753,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(
                 chat_id=db_chat,
                 video=media.file_id,
-                caption=original_caption or None,
+                caption=original_caption or f"🎬 {file_name}",
                 supports_streaming=True,
             )
         else:
@@ -760,7 +761,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=db_chat,
                 document=media.file_id,
                 filename=file_name,
-                caption=original_caption or None,
+                caption=original_caption or f"🎬 {file_name}",
             )
         if is_admin(update.effective_user.id):
             await msg.reply_text(f"✅ Database channel မှာ တင်ပြီးပါပြီ။\n🔖 {file_name}")
