@@ -784,10 +784,10 @@ def get_original_filename(media, fallback="movie.mp4"):
     return fallback
 
 def clean_caption(text):
-    """Remove dashes (-) from captions: 'A-B-C' -> 'A B C'."""
+    """Remove dashes and special chars from captions: 'A-B_C.D/E' -> 'A B C D E'."""
     if not text:
         return text
-    text = re.sub(r'\s*-\s*', ' ', text)
+    text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27s]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
 
