@@ -773,6 +773,8 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     file_name = get_original_filename(media)
     original_caption = clean_caption(msg.caption or "")
+    if len(original_caption) > 1024:
+        original_caption = original_caption[:1023].rstrip() + "..."
 
     try:
         if msg.video:
