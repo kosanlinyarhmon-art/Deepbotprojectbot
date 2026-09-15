@@ -649,12 +649,25 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return ConversationHandler.END
 
+        caption_lines = [ln.strip() for ln in caption_full.split('\n') if ln.strip()]
+        movie_name = clean_caption(caption_lines[0]) if caption_lines else ""
+        synopsis_body = "\n".join(caption_lines[1:]).strip() if len(caption_lines) > 1 else ""
+
         if telegraph_url:
-            preview = caption_full[:300] + "..." if len(caption_full) > 300 else caption_full
-            photo_caption = f"📝 ဇာတ်ကားအကျဉ်းချုပ်\n\n{preview}"
+            preview = synopsis_body[:300] + "..." if len(synopsis_body) > 300 else synopsis_body
+            header = "📝 ဇာတ်ကားအကျဉ်းချုပ်"
         else:
-            truncated = caption_full[:1000] + "..." if len(caption_full) > 1000 else caption_full
-            photo_caption = f"📝 ဇာတ်ကားအကြောင်း\n\n{truncated}"
+            preview = synopsis_body[:1000] + "..." if len(synopsis_body) > 1000 else synopsis_body
+            header = "📝 ဇာတ်ကားအကြောင်း"
+
+        if movie_name and preview:
+            photo_caption = f"{movie_name}\n\n{header}\n\n{preview}"
+        elif movie_name:
+            photo_caption = f"{movie_name}\n\n{header}"
+        elif preview:
+            photo_caption = f"{header}\n\n{preview}"
+        else:
+            photo_caption = header
 
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
         await update.message.reply_text(
