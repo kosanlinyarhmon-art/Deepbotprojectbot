@@ -223,7 +223,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_name = file_name + ".mp4"
                 delivery_caption = clean_caption(file_info.get("file_caption") or f"🎬 {file_name}")
                 if len(delivery_caption) > 1024:
-                    delivery_caption = delivery_caption[:1023].rstrip() + "..."
+                    delivery_caption = delivery_caption[:1020].rstrip() + "..."
                 try:
                     sent_file = await context.bot.send_document(
                         chat_id=user_id,
@@ -486,7 +486,7 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 clean_cap = clean_caption(f.get('original_caption') or f"🎬 {f.get('original_name') or f['file_name']}")
                 if len(clean_cap) > 1024:
-                    clean_cap = clean_cap[:1023].rstrip() + "..."
+                    clean_cap = clean_cap[:1020].rstrip() + "..."
                 await context.bot.send_document(
                     chat_id=db_chat,
                     document=f['file_id'],
@@ -676,7 +676,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Telegram caption limit is 1024 characters — enforce it.
         if len(photo_caption) > 1024:
-            photo_caption = photo_caption[:1023].rstrip() + "..."
+            photo_caption = photo_caption[:1020].rstrip() + "..."
 
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
         await update.message.reply_text(
@@ -711,7 +711,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     db_caption = clean_caption(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
                     if len(db_caption) > 1024:
-                        db_caption = db_caption[:1023].rstrip() + "..."
+                        db_caption = db_caption[:1020].rstrip() + "..."
                     if v.get('is_video'):
                         await context.bot.send_video(
                             chat_id=db_chat,
@@ -774,7 +774,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = get_original_filename(media)
     original_caption = clean_caption(msg.caption or "")
     if len(original_caption) > 1024:
-        original_caption = original_caption[:1023].rstrip() + "..."
+        original_caption = original_caption[:1020].rstrip() + "..."
 
     try:
         if msg.video:
