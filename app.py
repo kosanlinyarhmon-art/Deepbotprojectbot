@@ -487,13 +487,24 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 clean_cap = clean_caption(f.get('original_caption') or f"🎬 {f.get('original_name') or f['file_name']}")
                 if len(clean_cap) > 1024:
                     clean_cap = clean_cap[:1020].rstrip() + "..."
-                await context.bot.send_document(
-                    chat_id=db_chat,
-                    document=f['file_id'],
-                    filename=f.get('original_name') or f['file_name'],
-                    caption=clean_cap,
-                )
+                for attempt in range(3):
+                    try:
+                        await context.bot.send_document(
+                            chat_id=db_chat,
+                            document=f['file_id'],
+                            filename=f.get('original_name') or f['file_name'],
+                            caption=clean_cap,
+                        )
+                        break
+                    except TelegramError as e:
+                        if "flood" in str(e).lower() or "retry" in str(e).lower():
+                            wait = 10 * (attempt + 1)
+                            logger.warning(f"Flood control hit, waiting {wait}s: {e}")
+                            await asyncio.sleep(wait)
+                            continue
+                        raise
                 db_ok += 1
+                await asyncio.sleep(2)
             except TelegramError as e:
                 db_fail.append(f['file_name'])
                 logger.error(f"Batch DB post failed for {f['file_name']}: {e}")
@@ -712,21 +723,32 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_caption = clean_caption(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
                     if len(db_caption) > 1024:
                         db_caption = db_caption[:1020].rstrip() + "..."
-                    if v.get('is_video'):
-                        await context.bot.send_video(
-                            chat_id=db_chat,
-                            video=v['file_id'],
-                            caption=db_caption,
-                            supports_streaming=True,
-                        )
-                    else:
-                        await context.bot.send_document(
-                            chat_id=db_chat,
-                            document=v['file_id'],
-                            filename=v.get('original_name') or v['file_name'],
-                            caption=db_caption,
-                        )
+                    for attempt in range(3):
+                        try:
+                            if v.get('is_video'):
+                                await context.bot.send_video(
+                                    chat_id=db_chat,
+                                    video=v['file_id'],
+                                    caption=db_caption,
+                                    supports_streaming=True,
+                                )
+                            else:
+                                await context.bot.send_document(
+                                    chat_id=db_chat,
+                                    document=v['file_id'],
+                                    filename=v.get('original_name') or v['file_name'],
+                                    caption=db_caption,
+                                )
+                            break
+                        except TelegramError as e:
+                            if "flood" in str(e).lower() or "retry" in str(e).lower():
+                                wait = 10 * (attempt + 1)
+                                logger.warning(f"Flood control hit, waiting {wait}s: {e}")
+                                await asyncio.sleep(wait)
+                                continue
+                            raise
                     db_ok += 1
+                    await asyncio.sleep(2)
                 except Exception as e:
                     db_fail.append(v['file_name'])
                     logger.error(f"Auto database-channel post failed for {v['file_name']}: {e}")
@@ -776,27 +798,38 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(original_caption) > 1024:
         original_caption = original_caption[:1020].rstrip() + "..."
 
-    try:
-        if msg.video:
-            await context.bot.send_video(
-                chat_id=db_chat,
-                video=media.file_id,
-                caption=original_caption or f"🎬 {file_name}",
-                supports_streaming=True,
-            )
-        else:
-            await context.bot.send_document(
-                chat_id=db_chat,
-                document=media.file_id,
-                filename=file_name,
-                caption=original_caption or f"🎬 {file_name}",
-            )
-        if is_admin(update.effective_user.id):
-            await msg.reply_text(f"✅ Database channel မှာ တင်ပြီးပါပြီ။\n🔖 {file_name}")
-    except Exception as e:
-        logger.error(f"Forwarded DB post failed: {e}")
-        if is_admin(update.effective_user.id):
-            await msg.reply_text(f"❌ Database channel မှာ တင်၍မရပါ: {str(e)}")
+    for attempt in range(3):
+        try:
+            if msg.video:
+                await context.bot.send_video(
+                    chat_id=db_chat,
+                    video=media.file_id,
+                    caption=original_caption or f"🎬 {file_name}",
+                    supports_streaming=True,
+                )
+            else:
+                await context.bot.send_document(
+                    chat_id=db_chat,
+                    document=media.file_id,
+                    filename=file_name,
+                    caption=original_caption or f"🎬 {file_name}",
+                )
+            break
+        except TelegramError as e:
+            if "flood" in str(e).lower() or "retry" in str(e).lower():
+                wait = 10 * (attempt + 1)
+                logger.warning(f"Flood control hit, waiting {wait}s: {e}")
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception as e:
+            logger.error(f"Forwarded DB post failed: {e}")
+            if is_admin(update.effective_user.id):
+                await msg.reply_text(f"❌ Database channel မှာ တင်၍မရပါ: {str(e)}")
+            return
+    await asyncio.sleep(1)
+    if is_admin(update.effective_user.id):
+        await msg.reply_text(f"✅ Database channel မှာ တင်ပြီးပါပြီ။\n🔖 {file_name}")
 
 def get_original_filename(media, fallback="movie.mp4"):
     """Return the real filename as saved on the uploader's computer."""
