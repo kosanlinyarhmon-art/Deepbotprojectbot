@@ -846,7 +846,7 @@ def clean_caption(text):
     """Remove dashes and special chars from captions: 'A-B_C.D/E' -> 'A B C D E'."""
     if not text:
         return text
-    text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27s]', ' ', text)
+    text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
 
