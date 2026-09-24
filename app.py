@@ -719,14 +719,16 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if DATABASE_CHANNEL_ID:
             db_chat = int(DATABASE_CHANNEL_ID.strip())
 
-            # 1) Poster photo with the same caption shown on the movie channels.
+            # 1) Poster photo with only the movie name as caption
+            # (the full synopsis is posted separately below as its own message).
+            db_poster_caption = movie_name or photo_caption
             try:
                 for attempt in range(3):
                     try:
                         await context.bot.send_photo(
                             chat_id=db_chat,
                             photo=poster,
-                            caption=photo_caption,
+                            caption=db_poster_caption,
                         )
                         break
                     except TelegramError as e:
