@@ -713,11 +713,62 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_failed.append(chat_id)
                 logger.error(f"Auto movie-channel post failed to {chat_id}: {e}")
 
-        # Auto-post ALL movie files to the database channel (bot's own copies).
+        # Auto-post to the database channel, in order: poster photo → synopsis → movie files.
         db_ok = 0
         db_fail = []
         if DATABASE_CHANNEL_ID:
             db_chat = int(DATABASE_CHANNEL_ID.strip())
+
+            # 1) Poster photo with the same caption shown on the movie channels.
+            try:
+                for attempt in range(3):
+                    try:
+                        await context.bot.send_photo(
+                            chat_id=db_chat,
+                            photo=poster,
+                            caption=photo_caption,
+                        )
+                        break
+                    except TelegramError as e:
+                        if "flood" in str(e).lower() or "retry" in str(e).lower():
+                            wait = 10 * (attempt + 1)
+                            logger.warning(f"Flood control hit (DB poster), waiting {wait}s: {e}")
+                            await asyncio.sleep(wait)
+                            continue
+                        raise
+                db_ok += 1
+                await asyncio.sleep(2)
+            except Exception as e:
+                db_fail.append("ပုံ (poster)")
+                logger.error(f"Auto database-channel poster post failed: {e}")
+
+            # 2) Synopsis text (ဇာတ်ညွှန်း) as its own message.
+            db_synopsis = caption_full.strip()
+            if db_synopsis:
+                if len(db_synopsis) > 4000:
+                    db_synopsis = db_synopsis[:3997].rstrip() + "..."
+                try:
+                    for attempt in range(3):
+                        try:
+                            await context.bot.send_message(
+                                chat_id=db_chat,
+                                text=db_synopsis,
+                            )
+                            break
+                        except TelegramError as e:
+                            if "flood" in str(e).lower() or "retry" in str(e).lower():
+                                wait = 10 * (attempt + 1)
+                                logger.warning(f"Flood control hit (DB synopsis), waiting {wait}s: {e}")
+                                await asyncio.sleep(wait)
+                                continue
+                            raise
+                    db_ok += 1
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    db_fail.append("ဇာတ်ညွှန်း")
+                    logger.error(f"Auto database-channel synopsis post failed: {e}")
+
+            # 3) Movie files (bot's own copies).
             for v in videos:
                 try:
                     db_caption = clean_caption(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
@@ -756,11 +807,11 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
         summary += f"🎬 Movie channel {movie_posted}/{len(MOVIE_CHANNEL_IDS)} ခုမှာ တင်ပြီးပါပြီ။\n"
         if DATABASE_CHANNEL_ID:
-            summary += f"🗄️ Database channel မှာ movie ဖိုင် {db_ok}/{total} တင်ပြီး။\n"
+            summary += f"🗄️ DB channel တွင် ပုံ • ဇာတ်ညွှန်း • movie post {db_ok} ခု အောင်မြင်ပြီး။\n"
         if movie_failed:
             summary += f"⚠️ တင်၍မရတဲ့ channel: {', '.join(str(c) for c in movie_failed)}\n"
         if db_fail:
-            summary += f"⚠️ DB တင်၍မရတဲ့ဖိုင်များ: {', '.join(db_fail)}\n"
+            summary += f"⚠️ DB တင်၍မရတဲ့အရာများ: {', '.join(db_fail)}\n"
         await update.message.reply_text(summary)
         context.user_data.clear()
         return ConversationHandler.END
