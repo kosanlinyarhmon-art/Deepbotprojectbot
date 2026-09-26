@@ -721,7 +721,9 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # 1) Poster photo with only the movie name as caption
             # (the full synopsis is posted separately below as its own message).
-            db_poster_caption = movie_name or photo_caption
+            # Dashes are kept; other special chars and Myanmar text are cleaned.
+            db_poster_name = clean_caption_db(caption_lines[0]) if caption_lines else ""
+            db_poster_caption = db_poster_name or photo_caption
             try:
                 for attempt in range(3):
                     try:
@@ -773,8 +775,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 3) Movie files (bot's own copies).
             for v in videos:
                 try:
-                    db_caption = v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}"
-                    db_caption = db_caption.strip()
+                    db_caption = clean_caption_db(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
                     if len(db_caption) > 1024:
                         db_caption = db_caption[:1020].rstrip() + "..."
                     for attempt in range(3):
@@ -903,6 +904,18 @@ def clean_caption(text):
     text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
+
+
+def clean_caption_db(text):
+    """Keep dashes, but strip other special chars and Myanmar (Burmese) text.
+
+    'A-B_C.D/မြန်မာ' -> 'A-B C D'  (dashes are kept, everything else cleaned).
+    """
+    if not text:
+        return text
+    text = re.sub(r'[^A-Za-z0-9\s\-]', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip(' -')
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
