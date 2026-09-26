@@ -149,16 +149,17 @@ def main():
                 name, syn = split_poster_caption(cap)
                 p_pid = poster
 
+            poster_ok = True
             try:
                 await with_flood(lambda: bot.copy_message(
                     chat_id=DST, from_chat_id=SRC, message_id=p_pid, caption=name))
             except TelegramError as e:
-                logger.write(f"POSTER_FAIL {poster} :: {e}\n"); logger.flush()
-                fail += 1
-                continue
+                logger.write(f"POSTER_SKIP {poster} :: {e}\n"); logger.flush()
+                print(f"  poster copy failed #{p_pid}: {e} -> videos only", flush=True)
+                poster_ok = False
             await asyncio.sleep(2)
 
-            if syn:
+            if syn and poster_ok:
                 if len(syn) > SYN_CAP:
                     syn = syn[: SYN_CAP - 3].rstrip() + "..."
                 try:
