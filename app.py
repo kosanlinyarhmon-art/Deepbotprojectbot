@@ -773,7 +773,8 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 3) Movie files (bot's own copies).
             for v in videos:
                 try:
-                    db_caption = clean_caption(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
+                    db_caption = v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}"
+                    db_caption = db_caption.strip()
                     if len(db_caption) > 1024:
                         db_caption = db_caption[:1020].rstrip() + "..."
                     for attempt in range(3):
