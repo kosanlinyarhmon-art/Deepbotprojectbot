@@ -907,15 +907,19 @@ def clean_caption(text):
 
 
 def clean_caption_db(text):
-    """Keep dashes, but strip other special chars and Myanmar (Burmese) text.
+    """Strip dashes, special chars and Myanmar (Burmese) text from captions.
 
-    'A-B_C.D/မြန်မာ' -> 'A-B C D'  (dashes are kept, everything else cleaned).
+    'L-i-b-a-n-g (2026) - မြန်မာစာ' -> 'Libang 2026'
+    Dashes are REMOVED entirely (copyright-evasion style L-i-b-a-n-g -> Libang),
+    other special chars become spaces, and Myanmar text is dropped.
     """
     if not text:
         return text
-    text = re.sub(r'[^A-Za-z0-9\s\-]', ' ', text)
+    text = text.replace('-', '')
+    text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
+    text = re.sub(r'[^A-Za-z0-9\s]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
-    return text.strip(' -')
+    return text.strip()
 
 # ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
