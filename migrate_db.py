@@ -2,10 +2,19 @@ import asyncio, json, os, re, sys
 from telegram import Bot
 from telegram.error import TelegramError
 
+def _first_int(value, default):
+    for part in str(value or "").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            return int(part)
+    return default
+
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 SRC = int(os.environ.get("MIGRATE_SOURCE", "-1003753299714"))
 DST = int(os.environ.get("DATABASE_CHANNEL_ID", os.environ.get("DB_CHANNEL", "0")))
-SCRATCH = int(os.environ.get("SCRATCH_CHAT", os.environ.get("ADMIN_ID", "1147922719")))
+SCRATCH = _first_int(
+    os.environ.get("SCRATCH_CHAT", "") or os.environ.get("ADMIN_ID", ""),
+    1147922719)
 JSON_FILE = os.environ.get("MIGRATE_JSON", "old_posts.json")
 PROGRESS_FILE = os.environ.get("MIGRATE_PROGRESS", "migrate_progress.json")
 MONGO_URI = os.environ.get("MONGO_URI", "")
