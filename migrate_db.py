@@ -8,12 +8,16 @@ DST = int(os.environ.get("DATABASE_CHANNEL_ID", os.environ.get("DB_CHANNEL", "0"
 SCRATCH = int(os.environ.get("SCRATCH_CHAT", os.environ.get("ADMIN_ID", "1147922719")))
 JSON_FILE = os.environ.get("MIGRATE_JSON", "old_posts.json")
 PROGRESS_FILE = os.environ.get("MIGRATE_PROGRESS", "migrate_progress.json")
+MONGO_URI = os.environ.get("MONGO_URI", "")
 DRY = os.environ.get("DRY_RUN", "0") == "1"
 LIMIT = int(os.environ.get("MIGRATE_LIMIT", "0"))
 CAP = 1020
 SYN_CAP = 4000
 SOURCE_CHANNEL_KEY = "3753299714"
 POSTER_BACK_SCAN = 4
+
+# Redirected (old) source channel, still independent copies.
+# SRC reads MIGRATE_SOURCE env (defaults to WZN Cinema Hub Movies).
 
 
 def clean_caption_db(text):
@@ -40,21 +44,69 @@ def split_poster_caption(cap):
     return name, syn
 
 
-def load_progress():
-    if os.path.exists(PROGRESS_FILE):
+class Progress:
+    """Done-set persisted to file AND MongoDB (survives ephemeral Render disk)."""
+
+    def __init__(self):
+        self._client = None
+        self._col = None
+        self.done = self._load()
+
+    def _mongo(self):
+        if self._col is not None:
+            return self._col
+        if not MONGO_URI:
+            return None
         try:
-            with open(PROGRESS_FILE, encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+            from pymongo import MongoClient
+            self._client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            self._col = self._client["telegram_bot"]["migrate_progress"]
+        except Exception as e:
+            print(f"mongo progress disabled: {e}", flush=True)
+            self._col = False
+        return self._col
+
+    def _load(self):
+        done = set()
+        if os.path.exists(PROGRESS_FILE):
+            try:
+                with open(PROGRESS_FILE, encoding="utf-8") as f:
+                    done |= set(json.load(f))
+            except Exception:
+                pass
+        col = self._mongo()
+        if col:
+            try:
+                doc = col.find_one({"_id": "migrate_db"})
+                if doc and doc.get("done"):
+                    done |= set(doc["done"])
+            except Exception:
+                pass
+        return done
+
+    def save(self):
+        tmp = PROGRESS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(self.done), f)
+        os.replace(tmp, PROGRESS_FILE)
+        col = self._mongo()
+        if col:
+            try:
+                col.update_one({"_id": "migrate_db"},
+                               {"$set": {"done": sorted(self.done)}}, upsert=True)
+            except Exception as e:
+                print(f"mongo progress save failed: {e}", flush=True)
 
 
-def save_progress(done):
-    tmp = PROGRESS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(sorted(done), f)
-    os.replace(tmp, PROGRESS_FILE)
+def load_groups():
+    with open(JSON_FILE, encoding="utf-8") as f:
+        entries = json.load(f)
+    groups = {}
+    for x in entries:
+        if x.get("channel") != SOURCE_CHANNEL_KEY:
+            continue
+        groups.setdefault(x.get("caption", ""), []).append(x["message_id"])
+    return groups
 
 
 async def with_flood(fn):
@@ -99,103 +151,114 @@ async def fetch_poster(bot, poster):
     return pid, name, syn
 
 
-def main():
+async def run_migration(dry=None, limit=None):
+    """Async entry point usable from a background thread (Render) or CLI."""
     if not TOKEN:
-        print("TELEGRAM_TOKEN env is required")
-        sys.exit(1)
+        raise RuntimeError("TELEGRAM_TOKEN env is required")
+    if dry is None:
+        dry = DRY
+    if limit is None:
+        limit = LIMIT
+    if limit:
+        dry = False  # MIGRATE_LIMIT implies a real, bounded run
 
-    with open(JSON_FILE, encoding="utf-8") as f:
-        entries = json.load(f)
-
-    groups = {}
-    for x in entries:
-        if x.get("channel") != SOURCE_CHANNEL_KEY:
-            continue
-        groups.setdefault(x.get("caption", ""), []).append(x["message_id"])
+    groups = load_groups()
     print(f"Source channel {SOURCE_CHANNEL_KEY}: {len(groups)} groups, "
           f"{sum(len(v) for v in groups.values())} video messages", flush=True)
 
-    done = load_progress()
-    todo = [(cap, sorted(mids)) for cap, mids in groups.items() if cap not in done]
+    progress = Progress()
+    todo = [(cap, sorted(mids)) for cap, mids in groups.items() if cap not in progress.done]
     todo.sort(key=lambda t: t[1][0])
-    if LIMIT:
-        todo = todo[:LIMIT]
+    if limit:
+        todo = todo[:limit]
     need = len(groups) - len(todo)
     print(f"Skipping {need} done groups, processing {len(todo)} groups", flush=True)
 
-    if DRY:
+    if dry:
         for cap, mids in todo[:20]:
             poster = mids[0] - 1
             print(f"  dry: poster-candidates=#{poster - POSTER_BACK_SCAN}..#{poster} "
                   f"videos={mids[:4]} cap='{cap[:40]}'", flush=True)
         print(f"DRY_RUN done ({min(20, len(todo))} shown).", flush=True)
-        return
+        return {"ok": 0, "fail": 0, "groups": len(groups), "done": len(progress.done)}
 
     if not DST or DST == 0:
-        print("DATABASE_CHANNEL_ID (or DB_CHANNEL) env is required for real run")
-        sys.exit(1)
+        raise RuntimeError("DATABASE_CHANNEL_ID (or DB_CHANNEL) env is required for real run")
 
-    logger = open("migrate.log", "a", encoding="utf-8")
+    logger = None
+    try:
+        logger = open("migrate.log", "a", encoding="utf-8")
+    except Exception:
+        logger = None
 
-    async def run():
-        bot = Bot(TOKEN)
-        ok = fail = 0
-        for i, (cap, mids) in enumerate(todo, 1):
-            poster = mids[0] - 1
-            try:
-                p_pid, name, syn = await fetch_poster(bot, poster)
-            except Exception as e:
-                print(f"  poster probe failed #{poster}: {e}", flush=True)
-                name, syn = split_poster_caption(cap)
-                p_pid = poster
+    bot = Bot(TOKEN)
+    ok = fail = 0
+    for i, (cap, mids) in enumerate(todo, 1):
+        poster = mids[0] - 1
+        try:
+            p_pid, name, syn = await fetch_poster(bot, poster)
+        except Exception as e:
+            print(f"  poster probe failed #{poster}: {e}", flush=True)
+            name, syn = split_poster_caption(cap)
+            p_pid = poster
 
-            poster_ok = True
-            try:
-                await with_flood(lambda: bot.copy_message(
-                    chat_id=DST, from_chat_id=SRC, message_id=p_pid, caption=name))
-            except TelegramError as e:
+        poster_ok = True
+        try:
+            await with_flood(lambda: bot.copy_message(
+                chat_id=DST, from_chat_id=SRC, message_id=p_pid, caption=name))
+        except TelegramError as e:
+            if logger:
                 logger.write(f"POSTER_SKIP {poster} :: {e}\n"); logger.flush()
-                print(f"  poster copy failed #{p_pid}: {e} -> videos only", flush=True)
-                poster_ok = False
+            print(f"  poster copy failed #{p_pid}: {e} -> videos only", flush=True)
+            poster_ok = False
+        await asyncio.sleep(2)
+
+        if syn and poster_ok:
+            if len(syn) > SYN_CAP:
+                syn = syn[: SYN_CAP - 3].rstrip() + "..."
+            try:
+                await with_flood(lambda: bot.send_message(chat_id=DST, text=syn))
+            except TelegramError as e:
+                if logger:
+                    logger.write(f"SYN_FAIL {poster} :: {e}\n"); logger.flush()
             await asyncio.sleep(2)
 
-            if syn and poster_ok:
-                if len(syn) > SYN_CAP:
-                    syn = syn[: SYN_CAP - 3].rstrip() + "..."
-                try:
-                    await with_flood(lambda: bot.send_message(chat_id=DST, text=syn))
-                except TelegramError as e:
-                    logger.write(f"SYN_FAIL {poster} :: {e}\n"); logger.flush()
-                await asyncio.sleep(2)
-
-            for mid in mids:
-                vcap = clean_caption_db(cap)
-                if not vcap:
-                    vcap = name or "Movie"
-                if len(vcap) > CAP:
-                    vcap = vcap[: CAP - 3].rstrip() + "..."
-                try:
-                    await with_flood(lambda: bot.copy_message(
-                        chat_id=DST, from_chat_id=SRC, message_id=mid, caption=vcap))
-                except TelegramError as e:
+        for mid in mids:
+            vcap = clean_caption_db(cap)
+            if not vcap:
+                vcap = name or "Movie"
+            if len(vcap) > CAP:
+                vcap = vcap[: CAP - 3].rstrip() + "..."
+            try:
+                await with_flood(lambda: bot.copy_message(
+                    chat_id=DST, from_chat_id=SRC, message_id=mid, caption=vcap))
+            except TelegramError as e:
+                fail += 1
+                if logger:
                     logger.write(f"VID_FAIL {mid} {cap[:40]} :: {e}\n"); logger.flush()
-                await asyncio.sleep(2)
+            await asyncio.sleep(2)
 
-            ok += 1
-            done.add(cap)
+        ok += 1
+        progress.done.add(cap)
+        if logger:
             logger.write(f"OK {cap[:60]} poster#{p_pid} videos={mids[:4]}\n"); logger.flush()
 
-            if i % 10 == 0:
-                save_progress(done)
-            if LIMIT and i >= LIMIT:
-                break
-            print(f"progress {i}/{len(todo)} ok={ok} fail={fail}", flush=True)
+        if i % 10 == 0:
+            progress.save()
+        if limit and i >= limit:
+            break
+        print(f"progress {i}/{len(todo)} ok={ok} fail={fail}", flush=True)
 
-        save_progress(done)
+    progress.save()
+    if logger:
         logger.close()
-        print(f"DONE ok={ok} fail={fail}", flush=True)
+    print(f"DONE ok={ok} fail={fail}", flush=True)
+    return {"ok": ok, "fail": fail, "groups": len(groups), "done": len(progress.done)}
 
-    asyncio.run(run())
+
+def main():
+    asyncio.run(run_migration())
 
 
-main()
+if __name__ == "__main__":
+    main()

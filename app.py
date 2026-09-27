@@ -1001,6 +1001,89 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_menu(update, context)
 
+# ---------- Background Migration (Render) ----------
+from migrate_db import run_migration as _run_db_migration, Progress as _DbProgress
+
+MIGRATION_STATE = {"type": None, "running": False, "started": ""}
+
+def _db_migration_worker(chat_id, dry, limit):
+    from telegram import Bot as _Bot
+    bot = _Bot(TOKEN)
+    MIGRATION_STATE["running"] = True
+    MIGRATION_STATE["type"] = "db"
+    MIGRATION_STATE["started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    async def send(text):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+        except Exception as e:
+            logger.warning(f"migration notify failed: {e}")
+
+    async def finish_success(res):
+        await send(f"✅ DB migration DONE: ok={res['ok']} fail={res['fail']} "
+                   f"(groups={res['groups']}, done={res['done']})")
+
+    async def finish_error(e):
+        await send(f"❌ migratedb failed: {type(e).__name__}: {e}")
+
+    async def main():
+        try:
+            res = await _run_db_migration(dry=dry, limit=limit)
+        except Exception as e:
+            logger.exception("migratedb thread failed")
+            await finish_error(e)
+            return
+        finally:
+            MIGRATION_STATE["type"] = None
+            MIGRATION_STATE["running"] = False
+        await finish_success(res)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+async def migratedb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+    if MIGRATION_STATE["running"]:
+        await update.message.reply_text(
+            f"⚠️ Migration လုပ်နေဆဲပါ ({MIGRATION_STATE['type']}), "
+            f"started {MIGRATION_STATE['started']}")
+        return
+    args = context.args or []
+    dry = "dry" in args or os.environ.get("DRY_RUN", "0") == "1"
+    limit = 0
+    for a in args:
+        if a.startswith("limit=") and a.split("=")[1].isdigit():
+            limit = int(a.split("=")[1])
+    mode = "DRY-RUN" if dry else f"real run (limit={limit or 'all'})"
+    threading.Thread(target=_db_migration_worker,
+                     args=(update.effective_chat.id, dry, limit),
+                     daemon=True).start()
+    await update.message.reply_text(
+        f"🚀 migratedb စတင်နေပါပြီ ({mode})။\n"
+        f"ဒီ run က Render server ပေါ်မှာ background ဖြစ်လို့ "
+        f"မင်းရဲ့ computer ပိတ်ထားရင်လဲ ဆက်လုပ်နေမှာပါ။\n"
+        f"ပြီးတဲ့အခါ ဒီ chat ထဲ status ပြန်ပို့ပါမယ်။")
+
+async def migrate_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+    if MIGRATION_STATE["running"]:
+        await update.message.reply_text(
+            f"🔄 Migration လုပ်နေဆဲ ({MIGRATION_STATE['type']}), "
+            f"started {MIGRATION_STATE['started']}")
+        return
+    prog = _DbProgress()
+    await update.message.reply_text(
+        f"⏹️ Migration မလုပ်ဖြစ်သေးပါ။\n"
+        f"Done groups (file+mongo progress): {len(prog.done)}")
+
 # ---------- Set Bot Commands ----------
 async def set_commands(application: Application):
     await application.bot.set_my_commands([
@@ -1013,7 +1096,9 @@ async def set_commands(application: Application):
         ("broadcast", "အသုံးပြုသူအားလုံးကို စာပို့ရန်"),
         ("menu", "Admin Menu ပြသရန်"),
         ("mute", "Maintenance mode ဖွင့်ရန်"),
-        ("unmute", "Maintenance mode ပိတ်ရန်")
+        ("unmute", "Maintenance mode ပိတ်ရန်"),
+        ("migratedb", "DB channel သို့ movies migrate လုပ်ရန် (Admin)"),
+        ("migrate_status", "Migration status ကြည့်ရန် (Admin)")
     ])
 
 # ---------- Application ----------
@@ -1065,6 +1150,8 @@ application.add_handler(CommandHandler("deleteall", deleteall))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
+application.add_handler(CommandHandler("migratedb", migratedb_command))
+application.add_handler(CommandHandler("migrate_status", migrate_status_command))
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 
 # ---------- Polling ----------
