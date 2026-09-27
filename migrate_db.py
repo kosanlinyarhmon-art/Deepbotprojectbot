@@ -84,7 +84,7 @@ class Progress:
             except Exception:
                 pass
         col = self._mongo()
-        if col:
+        if col is not None and col is not False:
             try:
                 doc = col.find_one({"_id": "migrate_db"})
                 if doc and doc.get("done"):
@@ -99,7 +99,7 @@ class Progress:
             json.dump(sorted(self.done), f)
         os.replace(tmp, PROGRESS_FILE)
         col = self._mongo()
-        if col:
+        if col is not None and col is not False:
             try:
                 col.update_one({"_id": "migrate_db"},
                                {"$set": {"done": sorted(self.done)}}, upsert=True)
