@@ -666,7 +666,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         caption_lines = [ln.strip() for ln in caption_full.split('\n') if ln.strip()]
         movie_name = clean_caption(caption_lines[0]) if caption_lines else ""
-        synopsis_body = "\n".join(caption_lines[1:]).strip() if len(caption_lines) > 1 else ""
+        synopsis_body = strip_notice("\n".join(caption_lines[1:]).strip()) if len(caption_lines) > 1 else ""
 
         if telegraph_url:
             preview = synopsis_body[:300] + "..." if len(synopsis_body) > 300 else synopsis_body
@@ -747,7 +747,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Auto database-channel poster post failed: {e}")
 
             # 2) Synopsis text (ဇာတ်ညွှန်း) as its own message.
-            db_synopsis = caption_full.strip()
+            db_synopsis = strip_notice(caption_full.strip())
             if db_synopsis:
                 if len(db_synopsis) > 4000:
                     db_synopsis = db_synopsis[:3997].rstrip() + "..."
@@ -897,10 +897,37 @@ def get_original_filename(media, fallback="movie.mp4"):
             return name
     return fallback
 
+def strip_notice(text):
+    """Remove auto-delete / 'forward to Saved Messages' promo blocks from captions."""
+    if not text:
+        return text
+    for pat in (
+        re.compile(r'\*\*\s*.*?moviesandseriesforallwzn.*?\*\*', re.I | re.S),
+        re.compile(r'\*\*\s*.*?(?:Forward\s+Saved\s+Messages|Forward\s*လုပ်ဖို့|Save\s*Message\s*ထဲ).*?\*\*', re.I | re.S),
+    ):
+        text = pat.sub('', text)
+    text = re.sub(
+        r'[（(]\s*[^()（）]*(?:Auto\s*Delete|Save\s*Messages?|Saved\s*Messages?|Forward)[^()（）]*[)）]',
+        '', text, flags=re.I | re.S)
+    text = re.sub(r'https?://t\.me/[A-Za-z0-9_]+', '', text, flags=re.I)
+    keep = []
+    for ln in text.split('\n'):
+        low = ln.lower()
+        if ('forward' in low and ('save' in low or 'saved' in low)) \
+           or 'moviesandseriesforallwzn' in low \
+           or ('auto delete' in low and ('save' in low or 'forward' in low)):
+            continue
+        keep.append(ln)
+    text = '\n'.join(keep)
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+
 def clean_caption(text):
     """Remove dashes and special chars from captions: 'A-B_C.D/E' -> 'A B C D E'."""
     if not text:
         return text
+    text = strip_notice(text)
     text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
@@ -915,6 +942,7 @@ def clean_caption_db(text):
     """
     if not text:
         return text
+    text = strip_notice(text)
     text = text.replace('-', '')
     text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
     text = re.sub(r'[^A-Za-z0-9\s]', ' ', text)

@@ -14,9 +14,36 @@ DB_NAME = "telegram_bot"
 COLLECTION = "file_store"
 
 
+def strip_notice(text):
+    """Remove auto-delete / 'forward to Saved Messages' promo blocks from captions."""
+    if not text:
+        return text
+    for pat in (
+        re.compile(r'\*\*\s*.*?moviesandseriesforallwzn.*?\*\*', re.I | re.S),
+        re.compile(r'\*\*\s*.*?(?:Forward\s+Saved\s+Messages|Forward\s*လုပ်ဖို့|Save\s*Message\s*ထဲ).*?\*\*', re.I | re.S),
+    ):
+        text = pat.sub('', text)
+    text = re.sub(
+        r'[（(]\s*[^()（）]*(?:Auto\s*Delete|Save\s*Messages?|Saved\s*Messages?|Forward)[^()（）]*[)）]',
+        '', text, flags=re.I | re.S)
+    text = re.sub(r'https?://t\.me/[A-Za-z0-9_]+', '', text, flags=re.I)
+    keep = []
+    for ln in text.split('\n'):
+        low = ln.lower()
+        if ('forward' in low and ('save' in low or 'saved' in low)) \
+           or 'moviesandseriesforallwzn' in low \
+           or ('auto delete' in low and ('save' in low or 'forward' in low)):
+            continue
+        keep.append(ln)
+    text = '\n'.join(keep)
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+
 def clean_caption_db(text):
     if not text:
         return text
+    text = strip_notice(text)
     text = text.replace('-', '')
     text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
     text = re.sub(r'[^A-Za-z0-9\s]', ' ', text)
