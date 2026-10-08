@@ -27,7 +27,7 @@ def strip_notice(text):
         r'[（(]\s*[^()（）]*(?:Auto\s*Delete|Save\s*Messages?|Saved\s*Messages?|Forward)[^()（）]*[)）]',
         '', text, flags=re.I | re.S)
     text = re.sub(r'https?://t\.me/[A-Za-z0-9_]+', '', text, flags=re.I)
-    text = re.sub(r'\b[Uu]pload(?:ed)?\s+[Bb]y\s+\S+', '', text)
+    text = re.sub(r'\b[uU]pload(?:ed|er)?[:\s.\-]*[bB][yY][:\s.\-]*\S+', '', text, flags=re.I)
     keep = []
     for ln in text.split('\n'):
         low = ln.lower()
