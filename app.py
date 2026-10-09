@@ -487,6 +487,7 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for f in files:
             try:
                 clean_cap = clean_caption(f.get('original_caption') or f"🎬 {f.get('original_name') or f['file_name']}")
+                clean_cap = append_upload_credit(clean_cap)
                 if len(clean_cap) > 1024:
                     clean_cap = clean_cap[:1020].rstrip() + "..."
                 for attempt in range(3):
@@ -778,6 +779,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for v in videos:
                 try:
                     db_caption = clean_caption_db(v.get('original_caption') or f"🎬 {v.get('original_name') or v['file_name']}")
+                    db_caption = append_upload_credit(db_caption)
                     if len(db_caption) > 1024:
                         db_caption = db_caption[:1020].rstrip() + "..."
                     for attempt in range(3):
@@ -852,6 +854,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     file_name = get_original_filename(media)
     original_caption = clean_caption(msg.caption or "")
+    original_caption = append_upload_credit(original_caption)
     if len(original_caption) > 1024:
         original_caption = original_caption[:1020].rstrip() + "..."
 

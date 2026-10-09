@@ -24,6 +24,7 @@ CAP = 1020
 SYN_CAP = 4000
 SOURCE_CHANNEL_KEY = "3753299714"
 POSTER_BACK_SCAN = 4
+UPLOAD_CREDIT = os.environ.get("UPLOAD_CREDIT", "(Upload By WZN Cinema Hub Movies)")
 
 # Redirected (old) source channel, still independent copies.
 # SRC reads MIGRATE_SOURCE env (defaults to WZN Cinema Hub Movies).
@@ -65,6 +66,16 @@ def clean_caption_db(text):
     text = re.sub(r'[^A-Za-z0-9\s]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
+
+
+def append_upload_credit(text, max_len=CAP):
+    """Append the channel upload credit (e.g. '(Upload By WZN Cinema Hub Movies)') to a caption."""
+    if not text:
+        return text
+    suffix = f"\n{UPLOAD_CREDIT}"
+    if len(text) + len(suffix) <= max_len:
+        return text + suffix
+    return text[:max_len - len(suffix)].rstrip() + suffix
 
 
 def split_poster_caption(cap):
@@ -264,6 +275,7 @@ async def run_migration(dry=None, limit=None):
             vcap = clean_caption_db(cap)
             if not vcap:
                 vcap = name or "Movie"
+            vcap = append_upload_credit(vcap, CAP)
             if len(vcap) > CAP:
                 vcap = vcap[: CAP - 3].rstrip() + "..."
             try:
