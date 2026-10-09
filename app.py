@@ -107,6 +107,7 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
 MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")
 OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").split(",") if link.strip()] if os.environ.get("OTHER_CHANNELS") else []
+UPLOAD_CREDIT = os.environ.get("UPLOAD_CREDIT", "(Upload By WZN Cinema Hub Movies)")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
 # Channels where the bot posts forwarded movies itself (never as a forward).
@@ -222,6 +223,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
                 delivery_caption = clean_caption(file_info.get("file_caption") or f"🎬 {file_name}")
+                delivery_caption = append_upload_credit(delivery_caption)
                 if len(delivery_caption) > 1024:
                     delivery_caption = delivery_caption[:1020].rstrip() + "..."
                 try:
@@ -932,6 +934,16 @@ def clean_caption(text):
     text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
+
+
+def append_upload_credit(text, max_len=1024):
+    """Append the channel upload credit (e.g. '(Upload By WZN Cinema Hub Movies)') to a caption."""
+    if not text:
+        return text
+    suffix = f"\n{UPLOAD_CREDIT}"
+    if len(text) + len(suffix) <= max_len:
+        return text + suffix
+    return text[:max_len - len(suffix)].rstrip() + suffix
 
 
 def clean_caption_db(text):
