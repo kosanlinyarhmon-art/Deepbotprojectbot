@@ -158,6 +158,15 @@ async def create_telegraph_page(title: str, content_text: str) -> str:
         return None
 
 # ---------- ===================== CRITICAL: UNIFIED FILENAME FUNCTION ===================== ----------
+def clean_file_name(name):
+    """Remove Telegram copy prefixes like 'Copy of [MCS] 18.' from filenames."""
+    if not name:
+        return name
+    name = re.sub(r'^copy of\s+', '', name, flags=re.I)
+    name = re.sub(r'^\[[^\]]*\]\s*\d+\.?\s*', '', name)
+    return name.strip()
+
+
 def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4"):
     """
     UNIFIED function to get video name with priority:
@@ -169,7 +178,7 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
     # ၁။ မူလဖိုင်နာမည်ကို ဦးစားပေးယူမယ် (computer ထဲမှာ save ထားတဲ့ နာမည်)
     original = getattr(video, 'file_name', None)
     if original:
-        name = re.sub(r'\s+', ' ', original).strip()
+        name = clean_file_name(re.sub(r'\s+', ' ', original).strip())
         if name:
             if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                 name = name + ".mp4"
@@ -605,15 +614,31 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 
     caption = update.message.caption
     poster_caption = context.user_data.get('caption_full', '')
-    file_name = get_video_name(video, caption, poster_caption, "ဇာတ်ကား")
     original_name = get_original_filename(video)
+
+    script_first_line = ""
+    if not caption and poster_caption:
+        lines = [ln.strip() for ln in poster_caption.split('\n') if ln.strip()]
+        if lines:
+            script_first_line = clean_file_name(re.sub(r'\s+', ' ', lines[0]).strip())
+
+    if caption:
+        file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
+    elif script_first_line:
+        file_name = script_first_line
+        if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+            file_name = file_name + ".mp4"
+    else:
+        file_name = get_video_name(video, None, None, "ဇာတ်ကား")
+
+    movie_caption = caption or script_first_line
 
     videos = context.user_data.get('newpost_videos', [])
     videos.append({
         "file_id": video.file_id,
         "file_name": file_name,
         "original_name": original_name,
-        "original_caption": caption or "",
+        "original_caption": movie_caption or "",
         "is_video": bool(update.message.video),
     })
     context.user_data['newpost_videos'] = videos
@@ -895,7 +920,7 @@ def get_original_filename(media, fallback="movie.mp4"):
     """Return the real filename as saved on the uploader's computer."""
     name = getattr(media, 'file_name', None)
     if name:
-        name = re.sub(r'\s+', ' ', name).strip()
+        name = clean_file_name(re.sub(r'\s+', ' ', name).strip())
         if name:
             if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                 name = name + ".mp4"
