@@ -167,6 +167,20 @@ def clean_file_name(name):
     return name.strip()
 
 
+def clean_caption_text_only(text):
+    """Strip Myanmar text, URLs and emojis from a caption while keeping its
+    punctuation/word structure (used for filename generation)."""
+    if not text:
+        return text
+    text = strip_notice(text)
+    text = re.sub(r'https?://[^\s]+', ' ', text, flags=re.I)
+    text = re.sub(r't\.me/[A-Za-z0-9_+\-]+', ' ', text, flags=re.I)
+    text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
+    text = re.sub(r'[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]+', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
+
+
 def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4"):
     """
     UNIFIED function to get video name with priority:
@@ -178,7 +192,9 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
     # ၁။ မူလဖိုင်နာမည်ကို ဦးစားပေးယူမယ် (computer ထဲမှာ save ထားတဲ့ နာမည်)
     original = getattr(video, 'file_name', None)
     if original:
-        name = clean_file_name(re.sub(r'\s+', ' ', original).strip())
+        name = clean_caption_text_only(clean_file_name(re.sub(r'\s+', ' ', original).strip()))
+        if not name:
+            name = clean_file_name(re.sub(r'\s+', ' ', original).strip())
         if name:
             if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                 name = name + ".mp4"
@@ -186,7 +202,9 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
     
     # ၂။ Original filename မရှိရင် caption ကိုယူမယ်
     if caption:
-        name = re.sub(r'\s+', ' ', caption).strip()
+        name = clean_caption_text_only(re.sub(r'\s+', ' ', caption).strip())
+        if not name:
+            name = clean_file_name(re.sub(r'\s+', ' ', caption).strip())
         if name:
             if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                 name = name + ".mp4"
@@ -195,7 +213,9 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
     # ၃။ Poster caption ကနေယူမယ် (/newpost အတွက်)
     if poster_caption:
         lines = poster_caption.strip().split('\n')
-        name = lines[0].strip()
+        name = clean_caption_text_only(lines[0].strip())
+        if not name:
+            name = clean_file_name(lines[0].strip())
         if name:
             if len(name) > 100:
                 name = name[:97] + "..."
@@ -632,6 +652,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         file_name = get_video_name(video, None, None, "ဇာတ်ကား")
 
     movie_caption = caption or script_first_line
+    movie_caption = clean_caption_text_only(movie_caption)
 
     videos = context.user_data.get('newpost_videos', [])
     videos.append({
@@ -775,7 +796,10 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Auto database-channel poster post failed: {e}")
 
             # 2) Synopsis text (ဇာတ်ညွှန်း) as its own message.
-            db_synopsis = strip_notice(caption_full.strip())
+            # Dashes are split into readable words (Matchbox-The-Movie -> Matchbox The Movie)
+            # while Myanmar screenplay text is kept intact.
+            db_synopsis = smart_dash(strip_notice(caption_full.strip()))
+            db_synopsis = re.sub(r'[ \t]{2,}', ' ', db_synopsis)
             if db_synopsis:
                 if len(db_synopsis) > 4000:
                     db_synopsis = db_synopsis[:3997].rstrip() + "..."
