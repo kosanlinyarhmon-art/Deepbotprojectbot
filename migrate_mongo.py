@@ -15,7 +15,7 @@ COLLECTION = "file_store"
 
 
 def strip_notice(text):
-    """Remove auto-delete / 'forward to Saved Messages' promo blocks from captions."""
+    """Remove auto-delete / 'forward to Saved Messages' promos and ad (ADS) blocks from captions."""
     if not text:
         return text
     for pat in (
@@ -28,12 +28,29 @@ def strip_notice(text):
         '', text, flags=re.I | re.S)
     text = re.sub(r'https?://t\.me/[A-Za-z0-9_]+', '', text, flags=re.I)
     text = re.sub(r'\b[uU]pload(?:ed|er)?[:\s.\-]*[bB][yY][:\s.\-]*\S+', '', text, flags=re.I)
+    # Remove parenthesized ad blocks: (==== ADS ==== ... ), (===== AD ===== ... )
+    text = re.sub(
+        r'[（(]\s*=+\s*(?:ads?|ad)\s*=+[^()（）]*[)）]',
+        ' ', text, flags=re.I | re.S)
+    # Remove unparenthesized ad blocks: ===== ADS =====  ...  (until a blank line or next caption)
+    text = re.sub(
+        r'=+\s*(?:ads?|ad)\s*=+[^\n]*',
+        ' ', text, flags=re.I)
+    text = re.sub(
+        r'[（(]\s*=+\s*(?:ads?|ad)\s*=+.*?[)）]',
+        ' ', text, flags=re.I | re.S)
+    AD_LINE_KEYWORDS = (
+        'win rate', 'ace play', 'aceplay', 'free 9000',
+        'telegram', 'viber', 'casino', 'slot', 'betting',
+        'ဂိမ်း', 'ဘောနပ်', 'အကောင့်', 'ကစား',
+    )
     keep = []
     for ln in text.split('\n'):
         low = ln.lower()
         if ('forward' in low and ('save' in low or 'saved' in low)) \
            or 'moviesandseriesforallwzn' in low \
-           or ('auto delete' in low and ('save' in low or 'forward' in low)):
+           or ('auto delete' in low and ('save' in low or 'forward' in low)) \
+           or any(k in low for k in AD_LINE_KEYWORDS):
             continue
         keep.append(ln)
     text = '\n'.join(keep)
