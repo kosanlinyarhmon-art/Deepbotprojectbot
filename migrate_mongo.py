@@ -41,11 +41,19 @@ def strip_notice(text):
     return text.strip()
 
 
+def smart_dash(text):
+    """Merge copyright-style single letters (L-i-b-a-n-g -> Libang) but keep
+    real hyphenated words separated (WEB-DL -> WEB DL, S01-EP01 -> S01 EP01)."""
+    text = re.sub(r'\b([A-Za-z0-9](?:-[A-Za-z0-9])+)\b',
+                  lambda m: m.group(1).replace('-', ''), text)
+    return text.replace('-', ' ')
+
+
 def clean_caption_db(text):
     if not text:
         return text
     text = strip_notice(text)
-    text = text.replace('-', '')
+    text = smart_dash(text)
     text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
     text = re.sub(r'[^A-Za-z0-9\s]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
