@@ -1,4 +1,4 @@
-import os
+﻿import os
 import asyncio
 import threading
 import logging
@@ -980,7 +980,10 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     file_name = get_original_filename(media)
     raw_caption = msg.caption or ""
-    original_caption = clean_caption(extract_movie_name(raw_caption) or raw_caption)
+    extracted_raw = extract_movie_name(raw_caption)
+    if extracted_raw and re.search(r"[\u1000-\u109F]", extracted_raw):
+        extracted_raw = ""
+    original_caption = clean_caption(extracted_raw or raw_caption)
     original_caption = append_upload_credit(original_caption)
     if len(original_caption) > 1024:
         original_caption = original_caption[:1020].rstrip() + "..."
@@ -1381,3 +1384,5 @@ if __name__ == "__main__":
     migrate_old_documents()
     threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
+
+
