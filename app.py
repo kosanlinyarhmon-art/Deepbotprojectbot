@@ -167,6 +167,25 @@ def clean_file_name(name):
     return name.strip()
 
 
+def extract_movie_name(text):
+    """Pull the movie filename out of a caption that mixes it with ads/links/junk.
+
+    '♻️(CM) Ted Lasso.S03E12.So.Long.Farewell.1080p.mp4\nJoin Channel...' -> 'Ted Lasso.S03E12.So.Long.Farewell.1080p.mp4'
+    """
+    if not text:
+        return ""
+    m = re.search(r'[\w .\-()\'&,]+\.(?:mp4|mkv|avi|mov|wmv|flv|webm)', text, re.I)
+    if not m:
+        return ""
+    name = m.group(0).strip()
+    name = re.sub(r'^copy of\s+', '', name, flags=re.I)
+    name = re.sub(r'^[^\w()\[\]]+', '', name)
+    name = re.sub(r'^\[[^\]]*\]\s*', '', name)
+    name = re.sub(r'^\([^)]*\)\s*', '', name)
+    name = re.sub(r'\s{2,}', ' ', name)
+    return name.strip()
+
+
 def clean_caption_text_only(text):
     """Strip Myanmar text, URLs and emojis from a caption while keeping its
     punctuation/word structure (used for filename generation)."""
@@ -202,7 +221,9 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
     
     # ၂။ Original filename မရှိရင် caption ကိုယူမယ်
     if caption:
-        name = clean_caption_text_only(re.sub(r'\s+', ' ', caption).strip())
+        name = extract_movie_name(caption)
+        if not name:
+            name = clean_caption_text_only(re.sub(r'\s+', ' ', caption).strip())
         if not name:
             name = clean_file_name(re.sub(r'\s+', ' ', caption).strip())
         if name:
@@ -251,7 +272,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_name = re.sub(r'\s+', ' ', file_name).strip()
                 if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
                     file_name = file_name + ".mp4"
-                delivery_caption = clean_caption(file_info.get("file_caption") or f"🎬 {file_name}")
+                stored_caption = file_info.get("file_caption") or ""
+                movie_name_from_caption = extract_movie_name(stored_caption)
+                delivery_caption = clean_caption(movie_name_from_caption or stored_caption or f"🎬 {file_name}")
                 delivery_caption = append_upload_credit(delivery_caption)
                 if len(delivery_caption) > 1024:
                     delivery_caption = delivery_caption[:1020].rstrip() + "..."
@@ -414,7 +437,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 payload = generate_payload()
                 caption = update.message.caption
                 file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-                save_file_info(payload, video.file_id, file_name, caption or None)
+                save_file_info(payload, video.file_id, file_name, extract_movie_name(caption) or caption or None)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
@@ -446,7 +469,7 @@ async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT
                 payload = generate_payload()
                 caption = update.message.caption
                 file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-                save_file_info(payload, video.file_id, file_name, caption or None)
+                save_file_info(payload, video.file_id, file_name, extract_movie_name(caption) or caption or None)
                 deep_link = create_deep_linked_url(BOT_USERNAME, payload)
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
@@ -489,7 +512,7 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     original_name = get_original_filename(video)
 
     batch_files = context.user_data.get('batch_files', [])
-    batch_files.append({"file_id": file_id, "file_name": file_name, "original_name": original_name, "original_caption": caption or ""})
+    batch_files.append({"file_id": file_id, "file_name": file_name, "original_name": original_name, "original_caption": extract_movie_name(caption) or caption or ""})
     context.user_data['batch_files'] = batch_files
     count = len(batch_files)
     await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {count} ဖိုင်)")
@@ -642,9 +665,14 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         if lines:
             script_first_line = clean_file_name(re.sub(r'\s+', ' ', lines[0]).strip())
 
+    caption_movie_name = extract_movie_name(caption) if caption else ""
+
     if script_first_line:
         file_name = script_first_line
         movie_caption = script_first_line
+    elif caption_movie_name:
+        file_name = caption_movie_name
+        movie_caption = caption_movie_name
     elif caption:
         file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
         movie_caption = caption
