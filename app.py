@@ -637,21 +637,24 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     original_name = get_original_filename(video)
 
     script_first_line = ""
-    if not caption and poster_caption:
+    if poster_caption:
         lines = [ln.strip() for ln in poster_caption.split('\n') if ln.strip()]
         if lines:
             script_first_line = clean_file_name(re.sub(r'\s+', ' ', lines[0]).strip())
 
-    if caption:
-        file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-    elif script_first_line:
+    if script_first_line:
         file_name = script_first_line
-        if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-            file_name = file_name + ".mp4"
+        movie_caption = script_first_line
+    elif caption:
+        file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
+        movie_caption = caption
     else:
         file_name = get_video_name(video, None, None, "ဇာတ်ကား")
+        movie_caption = original_name or file_name
 
-    movie_caption = caption or script_first_line
+    if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+        file_name = file_name + ".mp4"
+
     movie_caption = clean_caption_text_only(movie_caption)
 
     videos = context.user_data.get('newpost_videos', [])
