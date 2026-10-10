@@ -167,23 +167,59 @@ def clean_file_name(name):
     return name.strip()
 
 
+SEASON_EP_RE = re.compile(
+    r'\bS\d{1,3}[\s\-–]?E\s?\d{1,4}\b'
+    r'|\bS\s?\d{1,3}[\s\-–]?EP?\s?\d{1,4}\b'
+    r'|\bSeason\s*\d{1,3}(?:\s*(?:and|&|,)?\s*Episode\s*\d{1,4})?'
+    r'|\bEpisode\s*\d{1,4}\b',
+    re.I)
+
+
+def find_season_episode(text):
+    """Return the season/episode marker ('S03E12', 'Season 3 Episode 12') in text, or ''."""
+    if not text:
+        return ""
+    m = SEASON_EP_RE.search(text)
+    if not m:
+        return ""
+    return re.sub(r'\s+', ' ', m.group(0)).strip()
+
+
 def extract_movie_name(text):
-    """Pull the movie filename out of a caption that mixes it with ads/links/junk.
+    """Pull the movie name out of a caption that mixes it with ads/links/junk.
 
     '♻️(CM) Ted Lasso.S03E12.So.Long.Farewell.1080p.mp4\nJoin Channel...' -> 'Ted Lasso.S03E12.So.Long.Farewell.1080p.mp4'
+    Season/episode markers ('(S03E12) Title.mkv') are always preserved.
     """
     if not text:
         return ""
+    se = find_season_episode(text)
     m = re.search(r'[\w .\-()\'&,]+\.(?:mp4|mkv|avi|mov|wmv|flv|webm)', text, re.I)
-    if not m:
-        return ""
-    name = m.group(0).strip()
-    name = re.sub(r'^copy of\s+', '', name, flags=re.I)
-    name = re.sub(r'^[^\w()\[\]]+', '', name)
-    name = re.sub(r'^\[[^\]]*\]\s*', '', name)
-    name = re.sub(r'^\([^)]*\)\s*', '', name)
-    name = re.sub(r'\s{2,}', ' ', name)
-    return name.strip()
+    if m:
+        name = m.group(0).strip()
+        name = re.sub(r'^copy of\s+', '', name, flags=re.I)
+        name = re.sub(r'^[^\w()\[\]]+', '', name)
+        name = re.sub(r'^\[[^\]]*\]\s*', '', name)
+        name = re.sub(r'^\d{1,3}\.\s*(?=[A-Za-z])', '', name)
+        paren = re.match(r'^\(([^)]*)\)\s*', name)
+        if paren and not find_season_episode(paren.group(1)):
+            name = re.sub(r'^\([^)]*\)\s*', '', name)
+        name = re.sub(r'\s{2,}', ' ', name).strip()
+        if se and not find_season_episode(name):
+            name = f"{se} {name}".strip()
+        return name
+    # No file extension in the caption: keep the first non-junk line as the name.
+    junk_re = re.compile(
+        r'filesize|duration|join|subscribe|vip|ads?\b|https?://|t\.me|'
+        r'quality|language|imdb|rated\b|directed|\bcast\b|release|channel', re.I)
+    label_re = re.compile(r'^(?:file\s*name|filename|title|name)\s*[:\-–]?\s*', re.I)
+    for raw_line in text.split('\n'):
+        line = label_re.sub('', clean_caption_text_only(raw_line)).strip()
+        if line and not junk_re.search(line):
+            if se and not find_season_episode(line):
+                line = f"{se} {line}".strip()
+            return line
+    return ""
 
 
 def clean_caption_text_only(text):
@@ -667,18 +703,28 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 
     caption_movie_name = extract_movie_name(caption) if caption else ""
 
-    if script_first_line:
-        file_name = script_first_line
-        movie_caption = script_first_line
-    elif caption_movie_name:
+    clean_original = ""
+    if original_name and not original_name.lower().startswith(('movie', 'video_')):
+        clean_original = original_name
+
+    if caption_movie_name:
         file_name = caption_movie_name
         movie_caption = caption_movie_name
-    elif caption:
-        file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-        movie_caption = caption
+    elif clean_original:
+        file_name = clean_original
+        movie_caption = clean_original
+    elif script_first_line:
+        file_name = script_first_line
+        movie_caption = script_first_line
     else:
         file_name = get_video_name(video, None, None, "ဇာတ်ကား")
-        movie_caption = original_name or file_name
+        movie_caption = file_name
+
+    se = find_season_episode(original_name) or find_season_episode(caption) or find_season_episode(script_first_line)
+    if se and not find_season_episode(movie_caption):
+        movie_caption = f"{movie_caption} {se}".strip()
+    if se and not find_season_episode(file_name):
+        file_name = f"{file_name} {se}".strip()
 
     if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
         file_name = file_name + ".mp4"
@@ -1029,7 +1075,10 @@ def strip_notice(text):
 
 def smart_dash(text):
     """Merge copyright-style single letters (L-i-b-a-n-g -> Libang) but keep
-    real hyphenated words separated (WEB-DL -> WEB DL, S01-EP01 -> S01 EP01)."""
+    real hyphenated words separated (WEB-DL -> WEB DL, S01-EP01 -> S01 EP01).
+    Season/episode markers (S03-E12) are normalised to S03E12."""
+    text = re.sub(r'\bS(\d{1,3})\s*[-–]\s*E(\d{1,4})\b',
+                  lambda m: f"S{m.group(1)}E{m.group(2)}", text, flags=re.I)
     text = re.sub(r'\b([A-Za-z0-9](?:-[A-Za-z0-9])+)\b',
                   lambda m: m.group(1).replace('-', ''), text)
     return text.replace('-', ' ')
