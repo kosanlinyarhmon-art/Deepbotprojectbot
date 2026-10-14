@@ -1396,6 +1396,13 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     chat = change.chat
+    logger.info(
+        "chat_member: chat=%s (%s) %s -> %s",
+        chat.id,
+        chat.type,
+        change.old_chat_member.status,
+        change.new_chat_member.status,
+    )
     if NOTIFY_CHANNEL_IDS and chat.id not in NOTIFY_CHANNEL_IDS:
         return
 
@@ -1422,8 +1429,32 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _notify_admins(context, "\n".join(lines))
 
 
+async def _log_notify_channel_status(bot):
+    """Startup diagnostic: is the bot an admin in each notify channel?"""
+    if not NOTIFY_CHANNEL_IDS:
+        logger.warning("No notify channels configured (set CHANNEL_IDS or CHANNEL_ID).")
+        return
+    try:
+        me = await bot.get_me()
+    except Exception as e:
+        logger.warning("Startup self-check failed: %s", e)
+        return
+    for chat_id in NOTIFY_CHANNEL_IDS:
+        try:
+            member = await bot.get_chat_member(chat_id, me.id)
+            logger.info("Notify channel %s: bot status=%s", chat_id, member.status)
+            if member.status not in ("administrator", "creator"):
+                logger.warning(
+                    "Bot is NOT an admin in %s — Telegram will not send "
+                    "join/leave updates for it.",
+                    chat_id,
+                )
+        except Exception as e:
+            logger.warning("Cannot read channel %s (bot not an admin?): %s", chat_id, e)
+
+
 # ---------- Application ----------
-application = Application.builder().token(TOKEN).allowed_updates(Update.ALL_TYPES).build()
+application = Application.builder().token(TOKEN).build()
 
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
@@ -1483,10 +1514,17 @@ def run_bot():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(set_commands(application))
+            loop.run_until_complete(_log_notify_channel_status(application.bot))
             logger.info("Starting bot polling...")
             # drop_pending_updates: never replay stale queued updates after a
             # restart, otherwise old forwarded movies get reposted/redelivered.
-            application.run_polling(drop_pending_updates=True)
+            # allowed_updates MUST include chat_member or Telegram never sends
+            # the channel join/leave notifications (PTB takes it here, not on
+            # the builder).
+            application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
         except Exception as e:
             logger.exception(f"Bot polling crashed: {e}. Restarting in 10s")
             import time
