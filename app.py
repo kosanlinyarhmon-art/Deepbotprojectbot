@@ -5,11 +5,11 @@ import logging
 import sys
 import secrets
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
 from telegraph import Telegraph
@@ -120,6 +120,9 @@ if DATABASE_CHANNEL_ID:
     _db_chat = int(DATABASE_CHANNEL_ID.strip())
     if _db_chat not in POST_CHANNEL_IDS:
         POST_CHANNEL_IDS.append(_db_chat)
+
+# Channels whose member join/leave we report to the admins (movie channels).
+NOTIFY_CHANNEL_IDS = set(MOVIE_CHANNEL_IDS)
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -1360,8 +1363,67 @@ async def set_commands(application: Application):
         ("migrate_status", "Migration status ကြည့်ရန် (Admin)")
     ])
 
+# ---------- Channel member join/leave notifications ----------
+# Telegram only sends 'chat_member' updates when the bot is an administrator of
+# the chat AND 'chat_member' is listed in allowed_updates (see Application
+# builder below). Myanmar time is UTC+6:30.
+MYANMAR_TZ = timezone(timedelta(hours=6, minutes=30))
+JOINED_STATUSES = ("member", "administrator", "creator", "restricted")
+GONE_STATUSES = ("left", "kicked")
+
+
+def _member_display(user) -> str:
+    name = " ".join(
+        p for p in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if p
+    )
+    if getattr(user, "username", None):
+        return f"{name} (@{user.username})" if name else f"@{user.username}"
+    return name or str(user.id)
+
+
+async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str):
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text)
+        except TelegramError as e:
+            logger.warning(f"Could not notify admin {admin_id}: {e}")
+
+
+async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Report channel joins/leaves to every admin in ADMIN_IDS."""
+    change = update.chat_member
+    if change is None:
+        return
+
+    chat = change.chat
+    if NOTIFY_CHANNEL_IDS and chat.id not in NOTIFY_CHANNEL_IDS:
+        return
+
+    old_status = change.old_chat_member.status
+    new_status = change.new_chat_member.status
+    joined = old_status in GONE_STATUSES and new_status in JOINED_STATUSES
+    left = new_status in GONE_STATUSES and old_status in JOINED_STATUSES
+    if not (joined or left):
+        return
+
+    member = change.new_chat_member.user if joined else change.old_chat_member.user
+    actor = change.from_user
+    when = change.date.astimezone(MYANMAR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = ["🟢 ချန်နယ်သို့ ဝင်လာသူ အသစ်" if joined else "🔴 ချန်နယ်မှ ထွက်သွားသူ"]
+    lines.append(f"👤 အမည်: {_member_display(member)}")
+    lines.append(f"🆔 ID: {member.id}")
+    if chat.title:
+        lines.append(f"📢 ချန်နယ်: {chat.title}")
+    lines.append(f"🕐 အချိန်: {when} (MMT)")
+    if actor and actor.id != member.id:
+        lines.append(f"✍️ ဆောင်ရွက်သူ: {_member_display(actor)} (ID: {actor.id})")
+
+    await _notify_admins(context, "\n".join(lines))
+
+
 # ---------- Application ----------
-application = Application.builder().token(TOKEN).build()
+application = Application.builder().token(TOKEN).allowed_updates(Update.ALL_TYPES).build()
 
 newpost_handler = ConversationHandler(
     entry_points=[CommandHandler('newpost', newpost_start)],
@@ -1412,6 +1474,7 @@ application.add_handler(CommandHandler("unmute", unmute))
 application.add_handler(CommandHandler("migratedb", migratedb_command))
 application.add_handler(CommandHandler("migrate_status", migrate_status_command))
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
+application.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
 # ---------- Polling ----------
 def run_bot():
