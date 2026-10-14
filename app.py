@@ -688,7 +688,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     if not video:
         if update.message.text and update.message.text.strip().lower() == 'a':
             return await finalize_newpost(update, context)
-        await update.message.reply_text("🎬 Movie file ပို့ပါ သို့မဟုတ် အားလုံးပြီးပါက 'a' ရိုက်ပါ။")
+
         return WAITING_VIDEO
 
     caption = update.message.caption
@@ -1384,5 +1384,6 @@ if __name__ == "__main__":
     migrate_old_documents()
     threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
+
 
 
