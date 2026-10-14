@@ -185,6 +185,71 @@ def find_season_episode(text):
     return re.sub(r'\s+', ' ', m.group(0)).strip()
 
 
+# Real file extensions we must never override with '.mp4'.
+# Lets the bot accept and deliver ANY file type, not just movies/videos.
+COMMON_FILE_EXTS = {
+    # video
+    'mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg',
+    'ts', 'm2ts', '3gp', 'vob', 'ogv',
+    # audio
+    'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'oga', 'opus', 'wma', 'amr',
+    'm4b', 'ac3', 'mka',
+    # archive
+    'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'iso', 'tgz', 'cab',
+    # documents
+    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf', 'csv',
+    'epub', 'mobi', 'odt', 'ods', 'odp', 'pages', 'numbers', 'key',
+    # images
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'svg', 'tif', 'tiff',
+    # apps / other
+    'apk', 'xapk', 'ipa', 'exe', 'msi', 'dmg', 'deb', 'rpm', 'bin', 'jar',
+    'ttf', 'otf', 'woff', 'woff2', 'srt', 'ass', 'ssa', 'vtt', 'sub',
+    'json', 'xml', 'yaml', 'yml', 'html', 'htm', 'js', 'css', 'py', 'sh', 'bat',
+}
+
+# Scene/quality tags that look like an extension but are not a file type.
+_SCENE_TOKENS = {
+    '1080p', '720p', '480p', '2160p', '4k', '8k', 'hd', 'sd', 'fhd', 'uhd',
+    'web', 'webrip', 'webdl', 'web-dl', 'bluray', 'blu-ray', 'brrip', 'bdrip',
+    'dvdrip', 'hdtv', 'hdrip', 'dvdscr', 'cam', 'tc', 'r5', 'x264', 'x265',
+    'h264', 'h265', 'hevc', 'avc', 'aac', 'ac3', 'dd5', 'dts', '10bit',
+    '8bit', 'proper', 'repack', 'extended', 'remastered', 'imax', 'multi',
+    'dual', 'subs', 'esub', 'dubbed',
+}
+
+
+def _has_real_extension(name):
+    """Return True when the filename ends with a believable file extension."""
+    m = re.search(r'\.([A-Za-z0-9+]{1,8})$', name)
+    if not m:
+        return False
+    ext = m.group(1)
+    low = ext.lower()
+    if low in COMMON_FILE_EXTS:
+        return True
+    if low in _SCENE_TOKENS:
+        return False
+    if find_season_episode(ext):
+        return False
+    if re.fullmatch(r'\d{3,4}[pi]', low):
+        return False
+    return 1 <= len(ext) <= 5 and bool(re.search(r'[A-Za-z]', ext))
+
+
+def preserve_extension(name, default=".mp4"):
+    """Keep a file's real extension; add the default only when there is none.
+
+    'Ted.Lasso.S03E12.1080p' -> 'Ted.Lasso.S03E12.1080p.mp4'
+    'archive.zip'            -> 'archive.zip'
+    'Subtitle.S01E02.srt'    -> 'Subtitle.S01E02.srt'
+    """
+    if not name:
+        return name
+    if _has_real_extension(name):
+        return name
+    return name + default
+
+
 def extract_movie_name(text):
     """Pull the movie name out of a caption that mixes it with ads/links/junk.
 
@@ -251,9 +316,7 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
         if not name:
             name = clean_file_name(re.sub(r'\s+', ' ', original).strip())
         if name:
-            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-                name = name + ".mp4"
-            return name
+            return preserve_extension(name)
     
     # ၂။ Original filename မရှိရင် caption ကိုယူမယ်
     if caption:
@@ -263,9 +326,7 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
         if not name:
             name = clean_file_name(re.sub(r'\s+', ' ', caption).strip())
         if name:
-            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-                name = name + ".mp4"
-            return name
+            return preserve_extension(name)
     
     # ၃။ Poster caption ကနေယူမယ် (/newpost အတွက်)
     if poster_caption:
@@ -276,9 +337,7 @@ def get_video_name(video, caption=None, poster_caption=None, fallback="movie.mp4
         if name:
             if len(name) > 100:
                 name = name[:97] + "..."
-            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-                name = name + ".mp4"
-            return name
+            return preserve_extension(name)
     
     # ၄။ အကုန်မရှိရင် fallback
     return fallback
@@ -306,8 +365,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not file_name:
                     file_name = "movie.mp4"
                 file_name = re.sub(r'\s+', ' ', file_name).strip()
-                if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-                    file_name = file_name + ".mp4"
+                file_name = preserve_extension(file_name)
                 stored_caption = file_info.get("file_caption") or ""
                 movie_name_from_caption = extract_movie_name(stored_caption)
                 delivery_caption = clean_caption(movie_name_from_caption or stored_caption or f"🎬 {file_name}")
@@ -460,7 +518,7 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။\nCaption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။")
+    await update.message.reply_text("📤 ဖိုင် တစ်ခု ပို့ပေးပါ။ (မည်သည့်ဖိုင်အမျိုးအစားမဆို ရပါသည်)\nCaption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။")
     context.user_data['waiting_for_video_link'] = True
 
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -485,14 +543,14 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
             context.user_data.pop('waiting_for_video_link', None)
         else:
-            await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
+            await update.message.reply_text("ဖိုင် တစ်ခု ပို့ပေးပါ။")
 
 # ---------- ===================== /newfile Command ===================== ----------
 async def newfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return
-    await update.message.reply_text("📤 Video file တစ်ခု ပို့ပေးပါ။\nCaption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။")
+    await update.message.reply_text("📤 ဖိုင် တစ်ခု ပို့ပေးပါ။ (မည်သည့်ဖိုင်အမျိုးအစားမဆို ရပါသည်)\nCaption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။")
     context.user_data['waiting_for_newfile'] = True
 
 async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -517,7 +575,7 @@ async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT
                 await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
             context.user_data.pop('waiting_for_newfile', None)
         else:
-            await update.message.reply_text("Video file တစ်ခု ပို့ပေးပါ။")
+            await update.message.reply_text("ဖိုင် တစ်ခု ပို့ပေးပါ။")
 
 # ---------- ===================== /batchlink Command ===================== ----------
 BATCH_WAITING_FILES, BATCH_DONE = range(2)
@@ -527,7 +585,7 @@ async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
     await update.message.reply_text(
-        "📤 Video ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။\n"
+        "📤 ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။ (မည်သည့်ဖိုင်အမျိုးအစားမဆို ရပါသည်)\n"
         "Caption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။\n"
         "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
     )
@@ -539,7 +597,7 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     video = update.message.video or update.message.document
     if not video:
-        await update.message.reply_text("Video file တစ်ခု ပို့ပါ။")
+        await update.message.reply_text("ဖိုင် တစ်ခု ပို့ပါ။")
         return BATCH_WAITING_FILES
 
     file_id = video.file_id
@@ -666,8 +724,8 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Telegraph စာမျက်နှာ ဖန်တီးရာတွင် ချို့ယွင်းချက်ရှိသည်။")
 
         await update.message.reply_text(
-            "🎬 Movie ဖိုင်များ ပို့ပေးပါ... (အများကြီးပို့နိုင်ပါသည်)\n"
-            "ဗီဒီယိုဖိုင်ရဲ့ Caption မှာ နာမည်ထည့်ပေးနိုင်ပါတယ်။\n"
+            "📁 ဖိုင်များ ပို့ပေးပါ... (မည်သည့်ဖိုင်အမျိုးအစားမဆို လက်ခံပါသည်၊ အများကြီးပို့နိုင်ပါသည်)\n"
+            "ဖိုင်ရဲ့ Caption မှာ နာမည်ထည့်ပေးနိုင်ပါတယ်။\n"
             "အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
         )
         return WAITING_VIDEO
@@ -679,11 +737,9 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CAPTION
 
 async def receive_video_after_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    video = None
-    if update.message.video:
-        video = update.message.video
-    elif update.message.document and update.message.document.mime_type.startswith('video/'):
-        video = update.message.document
+    # Accept ANY file the admin sends (video, or a document of any type) —
+    # not just movie/video files.
+    video = update.message.video or update.message.document
 
     if not video:
         if update.message.text and update.message.text.strip().lower() == 'a':
@@ -726,8 +782,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     if se and not find_season_episode(file_name):
         file_name = f"{file_name} {se}".strip()
 
-    if not file_name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-        file_name = file_name + ".mp4"
+    file_name = preserve_extension(file_name)
 
     movie_caption = clean_caption_text_only(movie_caption)
 
@@ -742,7 +797,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     context.user_data['newpost_videos'] = videos
     await update.message.reply_text(
         f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {len(videos)} ဖိုင်)\n"
-        f"နောက်ထပ် Movie ရှိလျှင် ထပ်ပို့ပါ။ အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
+        f"နောက်ထပ် ဖိုင်ရှိလျှင် ထပ်ပို့ပါ။ အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
     )
     return WAITING_VIDEO
 
@@ -750,7 +805,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     videos = context.user_data.get('newpost_videos', [])
     if not videos:
-        await update.message.reply_text("Movie file တစ်ခုခု မပို့ရသေးပါ။ ဦးစွာ ပို့ပေးပါ။")
+        await update.message.reply_text("ဖိုင် တစ်ခုခု မပို့ရသေးပါ။ ဦးစွာ ပို့ပေးပါ။")
         return WAITING_VIDEO
 
     try:
@@ -1027,9 +1082,7 @@ def get_original_filename(media, fallback="movie.mp4"):
     if name:
         name = clean_file_name(re.sub(r'\s+', ' ', name).strip())
         if name:
-            if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
-                name = name + ".mp4"
-            return name
+            return preserve_extension(name)
     return fallback
 
 def strip_notice(text):
