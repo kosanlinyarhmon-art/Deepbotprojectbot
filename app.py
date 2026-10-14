@@ -1391,8 +1391,14 @@ async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str):
     for admin_id in recipients:
         try:
             await context.bot.send_message(chat_id=admin_id, text=text)
+            logger.info("Join/leave notice delivered to %s", admin_id)
         except TelegramError as e:
-            logger.warning(f"Could not notify admin {admin_id}: {e}")
+            logger.warning(
+                "Could not notify %s: %s "
+                "(that account must press /start once so the bot can PM it)",
+                admin_id,
+                e,
+            )
 
 
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1437,6 +1443,10 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _log_notify_channel_status(bot):
     """Startup diagnostic: is the bot an admin in each notify channel?"""
+    logger.info(
+        "Join/leave notices go to these accounts: %s",
+        sorted(set(ADMIN_IDS) | {OWNER_ID}),
+    )
     if not NOTIFY_CHANNEL_IDS:
         logger.warning("No notify channels configured (set CHANNEL_IDS or CHANNEL_ID).")
         return
