@@ -110,6 +110,10 @@ OTHER_CHANNELS = [link.strip() for link in os.environ.get("OTHER_CHANNELS", "").
 UPLOAD_CREDIT = os.environ.get("UPLOAD_CREDIT", "(Upload By WZN Cinema Hub Movies)")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_ID", "").split(",") if id.strip()] if os.environ.get("ADMIN_ID") else []
 
+# The channel owner is ALWAYS notified of join/leave events, on top of ADMIN_ID
+# (override with the OWNER_ID env var if the owner ever changes).
+OWNER_ID = int(os.environ.get("OWNER_ID", "1147922719"))
+
 # Channels where the bot posts forwarded movies itself (never as a forward).
 # CHANNEL_IDS = the movie channels; DATABASE_CHANNEL_ID = the private backup channel.
 
@@ -1382,7 +1386,9 @@ def _member_display(user) -> str:
 
 
 async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str):
-    for admin_id in ADMIN_IDS:
+    recipients = set(ADMIN_IDS)
+    recipients.add(OWNER_ID)
+    for admin_id in recipients:
         try:
             await context.bot.send_message(chat_id=admin_id, text=text)
         except TelegramError as e:
