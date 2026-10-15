@@ -5,6 +5,7 @@ import logging
 import sys
 import secrets
 import re
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -257,6 +258,40 @@ def preserve_extension(name, default=".mp4"):
     return name + default
 
 
+def to_ascii_digits(text):
+    """Convert Unicode decimal digits (e.g. Burmese ၁၀၈၀) to ASCII digits (1080).
+
+    Must run BEFORE Myanmar text is stripped, otherwise the digits vanish with
+    the rest of the Myanmar block.
+    """
+    if not text:
+        return text
+    out = []
+    for ch in text:
+        if ch.isdigit():
+            try:
+                out.append(str(unicodedata.digit(ch)))
+                continue
+            except (TypeError, ValueError):
+                pass
+        out.append(ch)
+    return "".join(out)
+
+
+_QUALITY_RE = re.compile(r'(?<![A-Za-z0-9])(\d{3,4})\s*[pP](?![A-Za-z0-9])')
+
+
+def extract_quality(text):
+    """Return the resolution tag from a caption/filename as English '1080p'/'720p'.
+
+    Understands Burmese digits too ('၁၀၈၀p' -> '1080p'). Returns '' when none.
+    """
+    if not text:
+        return ""
+    m = _QUALITY_RE.search(to_ascii_digits(text))
+    return f"{m.group(1)}p" if m else ""
+
+
 def extract_movie_name(text):
     """Pull the movie name out of a caption that mixes it with ads/links/junk.
 
@@ -302,6 +337,7 @@ def clean_caption_text_only(text):
     text = strip_notice(text)
     text = re.sub(r'https?://[^\s]+', ' ', text, flags=re.I)
     text = re.sub(r't\.me/[A-Za-z0-9_+\-]+', ' ', text, flags=re.I)
+    text = to_ascii_digits(text)
     text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
     text = re.sub(r'[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]+', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
@@ -770,7 +806,19 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     if original_name and not original_name.lower().startswith(('movie', 'video_')):
         clean_original = original_name
 
-    if caption_movie_name:
+    # A Burmese (Myanmar) movie-file caption is unusable as a name (Myanmar text
+    # is stripped), so fall back to the movie name from the synopsis first line.
+    caption_is_myanmar = bool(
+        caption and re.search(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]', to_ascii_digits(caption)))
+    script_name = clean_caption_text_only(script_first_line) if script_first_line else ""
+
+    # Resolution tag (720p/1080p) from the file caption or its original filename.
+    quality = extract_quality(caption) or extract_quality(original_name)
+
+    if caption_is_myanmar and script_name:
+        file_name = script_name
+        movie_caption = script_name
+    elif caption_movie_name:
         file_name = caption_movie_name
         movie_caption = caption_movie_name
     elif clean_original:
@@ -788,6 +836,12 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
         movie_caption = f"{movie_caption} {se}".strip()
     if se and not find_season_episode(file_name):
         file_name = f"{file_name} {se}".strip()
+
+    # Keep the resolution (720p/1080p) that came with the file, even when we
+    # switched the name to the synopsis title.
+    if quality and not extract_quality(movie_caption):
+        movie_caption = f"{movie_caption} {quality}".strip()
+        file_name = f"{file_name} {quality}".strip()
 
     file_name = preserve_extension(file_name)
 
@@ -1153,6 +1207,7 @@ def clean_caption(text):
         return text
     text = strip_notice(text)
     text = smart_dash(text)
+    text = to_ascii_digits(text)
     text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
     text = re.sub(r'[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]+', ' ', text)
     text = re.sub(r'[_=+/.\-*#|\\\'\"!?@,\[\]\(\)\x27]', ' ', text)
@@ -1182,6 +1237,7 @@ def clean_caption_db(text):
         return text
     text = strip_notice(text)
     text = smart_dash(text)
+    text = to_ascii_digits(text)
     text = re.sub(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]+', ' ', text)
     text = re.sub(r'[^A-Za-z0-9\s]', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
