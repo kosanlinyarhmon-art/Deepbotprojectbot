@@ -7,7 +7,7 @@ import secrets
 import re
 from datetime import datetime, timezone, timedelta
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler
 from telegram.helpers import create_deep_linked_url
@@ -127,33 +127,6 @@ if DATABASE_CHANNEL_ID:
 
 # Channels whose member join/leave we report to the admins (movie channels).
 NOTIFY_CHANNEL_IDS = set(MOVIE_CHANNEL_IDS)
-
-# Custom thumbnail applied to every video/document the bot sends (branding).
-#   THUMBNAIL_FILE_ID = a Telegram file_id of the image (no re-upload per post), OR
-#   THUMBNAIL_PATH    = a local image file the bot can read (default thumbnail.jpg).
-THUMBNAIL_FILE_ID = os.environ.get("THUMBNAIL_FILE_ID", "").strip()
-THUMBNAIL_PATH = os.environ.get("THUMBNAIL_PATH", "thumbnail.jpg").strip()
-
-
-def _thumb():
-    """Return a FRESH thumbnail argument for one send call, or None.
-
-    A new object is returned each time because a single InputFile must not be
-    reused across multiple requests.
-    """
-    if THUMBNAIL_FILE_ID:
-        return THUMBNAIL_FILE_ID
-    if THUMBNAIL_PATH:
-        candidates = [THUMBNAIL_PATH]
-        if not os.path.isabs(THUMBNAIL_PATH):
-            candidates.append(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), THUMBNAIL_PATH)
-            )
-        for path in candidates:
-            if os.path.isfile(path):
-                return InputFile(path, filename=os.path.basename(path))
-    return None
-
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -411,8 +384,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=user_id,
                         document=file_id,
                         filename=file_name,
-                        caption=delivery_caption,
-                        thumbnail=_thumb(),
+                        caption=delivery_caption
                     )
                     delivered_message_ids.append(sent_file.message_id)
                 except Exception as e:
@@ -678,7 +650,6 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             document=f['file_id'],
                             filename=f.get('original_name') or f['file_name'],
                             caption=clean_cap,
-                            thumbnail=_thumb(),
                         )
                         break
                     except TelegramError as e:
@@ -1007,7 +978,6 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     video=v['file_id'],
                                     caption=db_caption,
                                     supports_streaming=True,
-                                    thumbnail=_thumb(),
                                 )
                             else:
                                 await context.bot.send_document(
@@ -1015,7 +985,6 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     document=v['file_id'],
                                     filename=v.get('original_name') or v['file_name'],
                                     caption=db_caption,
-                                    thumbnail=_thumb(),
                                 )
                             break
                         except TelegramError as e:
@@ -1089,7 +1058,6 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     video=media.file_id,
                     caption=original_caption or f"🎬 {file_name}",
                     supports_streaming=True,
-                    thumbnail=_thumb(),
                 )
             else:
                 await context.bot.send_document(
@@ -1097,7 +1065,6 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     document=media.file_id,
                     filename=file_name,
                     caption=original_caption or f"🎬 {file_name}",
-                    thumbnail=_thumb(),
                 )
             break
         except TelegramError as e:
