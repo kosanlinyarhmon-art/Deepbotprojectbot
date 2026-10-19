@@ -99,6 +99,29 @@ def get_file_info(payload):
     doc = file_store_collection.find_one({"payload": payload})
     return doc.get("files", []) if doc else []
 
+def save_link_info(payload, url, text=None, label=None):
+    """Attach a redirect link (deep link / post link) to a payload.
+
+    Link entries let a post send the user to another bot or channel post; the
+    optional ``text`` is shown as the message body above the link button.
+    """
+    entry = {"url": url, "text": text or "", "label": label or ""}
+    doc = file_store_collection.find_one({"payload": payload})
+    if doc:
+        links = doc.get("links", [])
+        links.append(entry)
+        file_store_collection.update_one({"payload": payload}, {"$set": {"links": links}})
+    else:
+        file_store_collection.insert_one({
+            "payload": payload,
+            "files": [],
+            "links": [entry],
+        })
+
+def get_link_info(payload):
+    doc = file_store_collection.find_one({"payload": payload})
+    return doc.get("links", []) if doc else []
+
 # ---------- Migration for old documents ----------
 def migrate_old_documents():
     docs = file_store_collection.find({"files": {"$exists": False}})
@@ -173,6 +196,49 @@ maintenance_mode = False
 
 def generate_payload():
     return secrets.token_urlsafe(16)
+
+# ---------- Telegram link (deep link / post link) parsing ----------
+_TG_SCHEME_RE = re.compile(r"tg://[^\s<>\"']+", re.I)
+_TG_WEB_RE = re.compile(
+    r"(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/"
+    r"(?:c/[0-9]+|[A-Za-z0-9_]{3,})"      # username, or /c/<internal-id>
+    r"(?:/[0-9]+)?"                        # optional post message id
+    r"(?:\?[^\s<>\"']*)?",                 # optional ?start=... deep-link query
+    re.I,
+)
+
+
+def extract_telegram_link(text):
+    """Return the first Telegram deep/post link found in *text*, else None.
+
+    Accepted:
+      * deep link  -> t.me/Bot?start=xxxx  (or tg://resolve?domain=Bot&start=...)
+      * post link  -> t.me/channel/123  or  t.me/c/1234567890/123
+    Anything that is not a real Telegram link (plain words, other URLs) returns
+    None, so callers can reject non-link text.
+    """
+    if not text:
+        return None
+    m = _TG_SCHEME_RE.search(text)
+    if m:
+        return m.group(0).rstrip(".,;:!)]}>\"'")
+    m = _TG_WEB_RE.search(text)
+    if not m:
+        return None
+    link = m.group(0).rstrip(".,;:!)]}>\"'")
+    if not link.lower().startswith(("http://", "https://")):
+        link = "https://" + link
+    return link
+
+
+def link_description(text, link):
+    """Message body for a link entry: the admin's text with the URL removed."""
+    if not text:
+        return ""
+    body = text.replace(link, " ")
+    body = re.sub(r"(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/\S+", " ", body, flags=re.I)
+    body = _TG_SCHEME_RE.sub(" ", body)
+    return re.sub(r"[ \t]+", " ", body).strip()
 
 async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -429,7 +495,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         file_list = get_file_info(payload)
-        if file_list:
+        link_list = get_link_info(payload)
+        if file_list or link_list:
             if not await is_member(user_id, context):
                 await update.message.reply_text(
                     f"❌ ခင်ဗျား Channel ကို မဝင်ရသေးပါ။\n\n👉 Channel သို့ဝင်ရန်: {INVITE_LINK}",
@@ -480,34 +547,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
 
-            warning_text = (
-                "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
-                "ဤရုပ်ရှင်ဖိုင်များ/ဗီဒီယိုများကို 5 မိနစ်အတွင်း (မူပိုင်ခွင့်ပြဿနာများကြောင့်) ဖျက်ပါမည်။\n\n"
-                "ကျေးဇူးပြု၍ ဤဖိုင်များ/ဗီဒီယိုများအားလုံးကို သင်၏ Saved Messages များသို့ Forward လုပ်ပြီး ထိုနေရာတွင် ဇာတ်ကားအား ကြည့်ရှုပါ။\n\n"
-                "ကျွန်ုပ်၏ Channel ကို လာရောက်အားပေးမှုအတွက် ကျေးဇူးအထူးတင်ပါတယ် 🙏🙏🙏\n\n"
-                "👉Channel ကို Share ခြင်းဖြင့်လည်း ကူညီနိုင်ပါတယ်။\n"
-                "အားလုံးကို ကျေးဇူးတင်ပါတယ်။\n\n!!! IMPORTANT !!!\n"
-                "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
-                "Please forward these ALL Files/Videos to your Saved Messages and start downloading there."
-            )
-            warn_msg = await context.bot.send_message(chat_id=user_id, text=warning_text)
+            # Redirect links (deep link / post link): text + inline URL button.
+            # These point the user to another bot or channel post and are left
+            # in the chat (not auto-deleted).
+            for ln in link_list:
+                url = (ln.get("url") or "").strip()
+                if not url:
+                    continue
+                body = (ln.get("text") or "").strip() or "🔗 ဒီလင့်ကနေ ဆက်လက်ကြည့်ရှုပါ"
+                label = (ln.get("label") or "").strip() or "🔗 လင့်ဖွင့်ရန်"
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=body,
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton(label, url=url)]]
+                        ),
+                        disable_web_page_preview=True,
+                    )
+                except Exception as e:
+                    logger.error("Failed to send link entry %s: %s", url, e)
 
-            async def delete_after():
-                await asyncio.sleep(300)
-                tasks = []
-                for mid in delivered_message_ids:
-                    tasks.append(
-                        context.bot.delete_message(chat_id=user_id, message_id=mid)
-                    )
-                tasks.append(
-                    context.bot.delete_message(
-                        chat_id=user_id, message_id=warn_msg.message_id
-                    )
+            if delivered_message_ids:
+                warning_text = (
+                    "⚠️ ⚠️ ⚠️ အရေးကြီးပါတယ် ⚠️ ⚠️ ⚠️\n\n"
+                    "ဤရုပ်ရှင်ဖိုင်များ/ဗီဒီယိုများကို 5 မိနစ်အတွင်း (မူပိုင်ခွင့်ပြဿနာများကြောင့်) ဖျက်ပါမည်။\n\n"
+                    "ကျေးဇူးပြု၍ ဤဖိုင်များ/ဗီဒီယိုများအားလုံးကို သင်၏ Saved Messages များသို့ Forward လုပ်ပြီး ထိုနေရာတွင် ဇာတ်ကားအား ကြည့်ရှုပါ။\n\n"
+                    "ကျွန်ုပ်၏ Channel ကို လာရောက်အားပေးမှုအတွက် ကျေးဇူးအထူးတင်ပါတယ် 🙏🙏🙏\n\n"
+                    "👉Channel ကို Share ခြင်းဖြင့်လည်း ကူညီနိုင်ပါတယ်။\n"
+                    "အားလုံးကို ကျေးဇူးတင်ပါတယ်။\n\n!!! IMPORTANT !!!\n"
+                    "This Movie Files/Videos will be deleted in 5 mins (Due to Copyright Issues).\n"
+                    "Please forward these ALL Files/Videos to your Saved Messages and start downloading there."
                 )
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                deleted = sum(1 for r in results if not isinstance(r, Exception))
-                logger.info(f"Auto-deleted {deleted}/{len(tasks)} delivered messages for user {user_id}")
-            asyncio.create_task(delete_after())
+                warn_msg = await context.bot.send_message(chat_id=user_id, text=warning_text)
+
+                async def delete_after():
+                    await asyncio.sleep(300)
+                    tasks = []
+                    for mid in delivered_message_ids:
+                        tasks.append(
+                            context.bot.delete_message(chat_id=user_id, message_id=mid)
+                        )
+                    tasks.append(
+                        context.bot.delete_message(
+                            chat_id=user_id, message_id=warn_msg.message_id
+                        )
+                    )
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    deleted = sum(1 for r in results if not isinstance(r, Exception))
+                    logger.info(f"Auto-deleted {deleted}/{len(tasks)} delivered messages for user {user_id}")
+                asyncio.create_task(delete_after())
 
             add_user(user_id)
             increment_requests()
@@ -684,9 +773,11 @@ async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📤 ဖိုင်များကို တစ်ခါတည်း သို့မဟုတ် တစ်ခုချင်း ပို့ပါ။ (မည်သည့်ဖိုင်အမျိုးအစားမဆို ရပါသည်)\n"
         "Caption မှာ မြန်မာလိုနာမည်ထည့်ပေးပါ။\n"
+        "🔗 တခြား bot/channel ရဲ့ လင့် (Deep link / Post link) ကိုလည်း ပို့နိုင်ပါတယ်။\n"
         "အားလုံးပြီးပါက /done ကိုနှိပ်ပါ။"
     )
     context.user_data['batch_files'] = []
+    context.user_data['batch_links'] = []
     return BATCH_WAITING_FILES
 
 async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -709,18 +800,48 @@ async def batch_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(f"✅ {file_name} ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {count} ဖိုင်)")
     return BATCH_WAITING_FILES
 
+async def batch_receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Accept a deep link / post link (with optional text) inside a batch.
+
+    Only a valid Telegram link is accepted; plain text is rejected.
+    """
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    text = update.message.text or ""
+    link = extract_telegram_link(text)
+    if link:
+        links = context.user_data.get('batch_links', [])
+        links.append({"url": link, "text": link_description(text, link)})
+        context.user_data['batch_links'] = links
+        await update.message.reply_text(
+            f"🔗 လင့် ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {len(links)} လင့်)\n"
+            f"နောက်ထပ် ဖိုင်/လင့် ရှိလျှင် ထပ်ပို့ပါ။ ပြီးပါက /done နှိပ်ပါ။"
+        )
+        return BATCH_WAITING_FILES
+    if text.strip():
+        await update.message.reply_text(
+            "❌ ဒါက တရားဝင် လင့် မဟုတ်ပါ။\n"
+            "Deep link (t.me/Bot?start=...) သို့မဟုတ် Post link (t.me/channel/123) ပို့ပါ။\n"
+            "ပြီးပါက /done နှိပ်ပါ။"
+        )
+    return BATCH_WAITING_FILES
+
 async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
     files = context.user_data.get('batch_files', [])
-    if not files:
-        await update.message.reply_text("❌ ဖိုင်မရှိပါ။ ထပ်မံစတင်ပါ။")
+    links = context.user_data.get('batch_links', [])
+    if not files and not links:
+        await update.message.reply_text("❌ ဖိုင်/လင့် မရှိပါ။ ထပ်မံစတင်ပါ။")
         return ConversationHandler.END
     payload = generate_payload()
     for f in files:
         save_file_info(payload, f['file_id'], f['file_name'], f.get('original_caption') or None)
+    for ln in links:
+        save_link_info(payload, ln['url'], ln.get('text'))
     deep_link = create_deep_linked_url(context.bot.username, payload)
     file_names = "\n".join([f"🎬 {f['file_name']}" for f in files])
+    link_lines = "\n".join([f"🔗 {ln['url']}" for ln in links])
 
     datab_report = ""
     if DATABASE_CHANNEL_ID:
@@ -766,11 +887,13 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Batch Link ဖန်တီးပြီးပါပြီ။\n\n"
-        f"ဖိုင်များ:\n{file_names}\n\n"
-        f"လင့်: {deep_link}"
-        f"{datab_report}"
+        f"ဖိုင်များ:\n{file_names}"
+        + (f"\n\n🔗 လင့်များ:\n{link_lines}" if links else "")
+        + f"\n\nလင့်: {deep_link}"
+        + f"{datab_report}"
     )
     context.user_data.pop('batch_files', None)
+    context.user_data.pop('batch_links', None)
     return ConversationHandler.END
 
 async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -778,6 +901,7 @@ async def batch_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await update.message.reply_text("လုပ်ဆောင်ချက် ပယ်ဖျက်ပြီးပါပြီ။")
     context.user_data.pop('batch_files', None)
+    context.user_data.pop('batch_links', None)
     return ConversationHandler.END
 
 # ---------- ===================== /newpost Command ===================== ----------
@@ -787,6 +911,8 @@ async def newpost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
         return ConversationHandler.END
+    context.user_data['newpost_videos'] = []
+    context.user_data['newpost_links'] = []
     await update.message.reply_text("📸 ဇာတ်ကားအတွက် ပုံတစ်ပုံ ပို့ပေးပါ...")
     return POSTER
 
@@ -825,6 +951,7 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             "📁 ဖိုင်များ ပို့ပေးပါ... (မည်သည့်ဖိုင်အမျိုးအစားမဆို လက်ခံပါသည်၊ အများကြီးပို့နိုင်ပါသည်)\n"
+            "🔗 တခြား bot/channel ရဲ့ လင့် (Deep link / Post link) ကိုလည်း ပို့နိုင်ပါတယ်။\n"
             "ဖိုင်ရဲ့ Caption မှာ နာမည်ထည့်ပေးနိုင်ပါတယ်။\n"
             "အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
         )
@@ -842,9 +969,28 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
     video = update.message.video or update.message.document
 
     if not video:
-        if update.message.text and update.message.text.strip().lower() == 'a':
+        text = update.message.text or ""
+        if text.strip().lower() == 'a':
             return await finalize_newpost(update, context)
 
+        # Not a file: accept an admin-provided redirect link (deep / post link).
+        # Plain text (no valid Telegram link) is rejected.
+        link = extract_telegram_link(text)
+        if link:
+            links = context.user_data.get('newpost_links', [])
+            links.append({"url": link, "text": link_description(text, link)})
+            context.user_data['newpost_links'] = links
+            await update.message.reply_text(
+                f"🔗 လင့် ကို လက်ခံရရှိပါပြီ။ (စုစုပေါင်း {len(links)} လင့်)\n"
+                f"နောက်ထပ် ဖိုင်/လင့် ရှိလျှင် ထပ်ပို့ပါ။ အားလုံးပြီးပါက 'a' ရိုက်ပါ။"
+            )
+            return WAITING_VIDEO
+        if text.strip():
+            await update.message.reply_text(
+                "❌ ဒါက တရားဝင် လင့် မဟုတ်ပါ။\n"
+                "Deep link (t.me/Bot?start=...) သို့မဟုတ် Post link (t.me/channel/123) ပို့ပါ။\n"
+                "ဆက်လုပ်ရန် 'a' ရိုက်ပါ။"
+            )
         return WAITING_VIDEO
 
     caption = update.message.caption
@@ -922,14 +1068,17 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 
 async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     videos = context.user_data.get('newpost_videos', [])
-    if not videos:
-        await update.message.reply_text("ဖိုင် တစ်ခုခု မပို့ရသေးပါ။ ဦးစွာ ပို့ပေးပါ။")
+    links = context.user_data.get('newpost_links', [])
+    if not videos and not links:
+        await update.message.reply_text("ဖိုင် သို့မဟုတ် လင့် မပို့ရသေးပါ။ ဦးစွာ ပို့ပေးပါ။")
         return WAITING_VIDEO
 
     try:
         payload = generate_payload()
         for v in videos:
             save_file_info(payload, v['file_id'], v['file_name'], v.get('original_caption') or None)
+        for ln in links:
+            save_link_info(payload, ln['url'], ln.get('text'))
         deep_link = create_deep_linked_url(context.bot.username, payload)
         file_names = "\n".join([f"🎬 {v['file_name']}" for v in videos])
         total = len(videos)
@@ -1823,10 +1972,11 @@ def build_application(token):
     batchlink_handler = ConversationHandler(
         entry_points=[CommandHandler('batchlink', batchlink_start)],
         states={
-            BATCH_WAITING_FILES: [
-                MessageHandler(filters.VIDEO | filters.Document.ALL, batch_receive_file),
-                CommandHandler('done', batch_done)
-            ],
+        BATCH_WAITING_FILES: [
+            MessageHandler(filters.VIDEO | filters.Document.ALL, batch_receive_file),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, batch_receive_text),
+            CommandHandler('done', batch_done)
+        ],
         },
         fallbacks=[CommandHandler('cancel', batch_cancel)],
     )
