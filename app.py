@@ -82,6 +82,18 @@ def save_file_info(payload, file_id, file_name, file_caption=None):
             "files": [{"file_id": file_id, "file_name": file_name, "file_caption": file_caption}]
         })
 
+def set_file_channel_message(payload, file_id, message_id):
+    """Remember which DATABASE_CHANNEL message holds this file's media.
+
+    Telegram ``file_id``s are bot-specific, so after a token swap the old ids
+    cannot be sent any more. Copying from the database channel works for ANY
+    bot that is a member there, which makes the files survive a bot change.
+    """
+    file_store_collection.update_one(
+        {"payload": payload, "files.file_id": file_id},
+        {"$set": {"files.$.channel_message_id": message_id}},
+    )
+
 def get_file_info(payload):
     doc = file_store_collection.find_one({"payload": payload})
     return doc.get("files", []) if doc else []
@@ -416,12 +428,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(delivery_caption) > 1024:
                     delivery_caption = delivery_caption[:1020].rstrip() + "..."
                 try:
-                    sent_file = await context.bot.send_document(
-                        chat_id=user_id,
-                        document=file_id,
-                        filename=file_name,
-                        caption=delivery_caption
-                    )
+                    # Prefer copying from the database channel: it works for any
+                    # bot that is a member there, even after the token changes
+                    # (file_ids are bot-specific and would break on a new bot).
+                    channel_message_id = file_info.get("channel_message_id")
+                    sent_file = None
+                    if DATABASE_CHANNEL_ID and channel_message_id:
+                        try:
+                            sent_file = await context.bot.copy_message(
+                                chat_id=user_id,
+                                from_chat_id=int(DATABASE_CHANNEL_ID.strip()),
+                                message_id=int(channel_message_id),
+                                caption=delivery_caption,
+                            )
+                        except TelegramError as e:
+                            logger.warning(
+                                "copy_message from DB channel failed for %s: %s", file_name, e)
+                    if sent_file is None:
+                        sent_file = await context.bot.send_document(
+                            chat_id=user_id,
+                            document=file_id,
+                            filename=file_name,
+                            caption=delivery_caption
+                        )
                     delivered_message_ids.append(sent_file.message_id)
                 except Exception as e:
                     await context.bot.send_message(chat_id=user_id, text=f"❌ {file_name} ပို့ရာတွင် အမှား: {str(e)}")
@@ -679,9 +708,10 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 clean_cap = append_upload_credit(clean_cap)
                 if len(clean_cap) > 1024:
                     clean_cap = clean_cap[:1020].rstrip() + "..."
+                sent_db = None
                 for attempt in range(3):
                     try:
-                        await context.bot.send_document(
+                        sent_db = await context.bot.send_document(
                             chat_id=db_chat,
                             document=f['file_id'],
                             filename=f.get('original_name') or f['file_name'],
@@ -695,6 +725,8 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await asyncio.sleep(wait)
                             continue
                         raise
+                if sent_db is not None:
+                    set_file_channel_message(payload, f['file_id'], sent_db.message_id)
                 db_ok += 1
                 await asyncio.sleep(2)
             except TelegramError as e:
@@ -1024,17 +1056,18 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_caption = append_upload_credit(db_caption)
                     if len(db_caption) > 1024:
                         db_caption = db_caption[:1020].rstrip() + "..."
+                    sent_db = None
                     for attempt in range(3):
                         try:
                             if v.get('is_video'):
-                                await context.bot.send_video(
+                                sent_db = await context.bot.send_video(
                                     chat_id=db_chat,
                                     video=v['file_id'],
                                     caption=db_caption,
                                     supports_streaming=True,
                                 )
                             else:
-                                await context.bot.send_document(
+                                sent_db = await context.bot.send_document(
                                     chat_id=db_chat,
                                     document=v['file_id'],
                                     filename=v.get('original_name') or v['file_name'],
@@ -1048,6 +1081,8 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 await asyncio.sleep(wait)
                                 continue
                             raise
+                    if sent_db is not None:
+                        set_file_channel_message(payload, v['file_id'], sent_db.message_id)
                     db_ok += 1
                     await asyncio.sleep(2)
                 except Exception as e:
