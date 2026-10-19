@@ -6,10 +6,11 @@ import sys
 import secrets
 import re
 import unicodedata
+import time
 from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import TelegramError, InvalidToken, Unauthorized
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
@@ -116,6 +117,30 @@ def migrate_old_documents():
 # ---------- Telegram Configuration ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
+
+
+def _load_token_pairs():
+    """Build the (token, username) list used for auto-failover.
+
+    Primary is TELEGRAM_TOKEN / BOT_USERNAME. Spares are read from
+    TELEGRAM_TOKEN_2 / BOT_USERNAME_2, TELEGRAM_TOKEN_3 / BOT_USERNAME_3, ...
+    A dead token (revoked / banned / deleted bot) makes the bot fall through to
+    the next spare automatically, keeping the same Mongo data and DB channel.
+    """
+    pairs = []
+    if TOKEN and TOKEN.strip():
+        pairs.append((TOKEN.strip(), (BOT_USERNAME or "").strip()))
+    i = 2
+    while True:
+        t = os.environ.get(f"TELEGRAM_TOKEN_{i}") or os.environ.get(f"BOT_TOKEN_{i}")
+        if not t or not t.strip():
+            break
+        u = os.environ.get(f"BOT_USERNAME_{i}") or os.environ.get(f"TELEGRAM_USERNAME_{i}")
+        pairs.append((t.strip(), (u or "").strip()))
+        i += 1
+    return pairs
+
+
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVITE_LINK = os.environ.get("INVITE_LINK")
 MUSIC_CHANNEL_LINK = os.environ.get("MUSIC_CHANNEL_LINK", "")
@@ -1773,81 +1798,130 @@ async def _log_notify_channel_status(bot):
 
 
 # ---------- Application ----------
-application = Application.builder().token(TOKEN).build()
+def build_application(token):
+    """Build a fresh Application for a given token.
 
-newpost_handler = ConversationHandler(
-    entry_points=[CommandHandler('newpost', newpost_start)],
-    states={
-        POSTER: [MessageHandler(filters.PHOTO, receive_poster)],
-        CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption)],
-        WAITING_VIDEO: [
-            MessageHandler(filters.VIDEO, receive_video_after_caption),
-            MessageHandler(filters.Document.ALL, receive_video_after_caption),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_video_after_caption)
-        ],
-    },
-    fallbacks=[CommandHandler('cancel', cancel_newpost)],
-)
+    Handlers are (re)built per token so the bot can swap to a spare token at
+    runtime without restarting the process.
+    """
+    application = Application.builder().token(token).build()
 
-batchlink_handler = ConversationHandler(
-    entry_points=[CommandHandler('batchlink', batchlink_start)],
-    states={
-        BATCH_WAITING_FILES: [
-            MessageHandler(filters.VIDEO | filters.Document.ALL, batch_receive_file),
-            CommandHandler('done', batch_done)
-        ],
-    },
-    fallbacks=[CommandHandler('cancel', batch_cancel)],
-)
+    newpost_handler = ConversationHandler(
+        entry_points=[CommandHandler('newpost', newpost_start)],
+        states={
+            POSTER: [MessageHandler(filters.PHOTO, receive_poster)],
+            CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption)],
+            WAITING_VIDEO: [
+                MessageHandler(filters.VIDEO, receive_video_after_caption),
+                MessageHandler(filters.Document.ALL, receive_video_after_caption),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_video_after_caption)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_newpost)],
+    )
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(newpost_handler)
-application.add_handler(batchlink_handler)
-application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
-application.add_handler(CommandHandler("link", link_command))
-application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
-application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_video_for_link))
-application.add_handler(CommandHandler("newfile", newfile_command))
-application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_newfile))
-application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_video_for_newfile))
-application.add_handler(CommandHandler("menu", menu_command))
-application.add_handler(CommandHandler("stats", stats))
-application.add_handler(CommandHandler("broadcast", broadcast))
-application.add_handler(CommandHandler("schedule", schedule))
-application.add_handler(CommandHandler("listschedule", listschedule))
-application.add_handler(CommandHandler("cancelschedule", cancelschedule))
-application.add_handler(CommandHandler("delete", delete_file))
-application.add_handler(CommandHandler("deleteall", deleteall))
-application.add_handler(CommandHandler("cancel", cancel))
-application.add_handler(CommandHandler("mute", mute))
-application.add_handler(CommandHandler("unmute", unmute))
-application.add_handler(CommandHandler("migratedb", migratedb_command))
-application.add_handler(CommandHandler("migrate_status", migrate_status_command))
-application.add_handler(CommandHandler("relinkdb", relinkdb_command))
-application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
-application.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+    batchlink_handler = ConversationHandler(
+        entry_points=[CommandHandler('batchlink', batchlink_start)],
+        states={
+            BATCH_WAITING_FILES: [
+                MessageHandler(filters.VIDEO | filters.Document.ALL, batch_receive_file),
+                CommandHandler('done', batch_done)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', batch_cancel)],
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(newpost_handler)
+    application.add_handler(batchlink_handler)
+    application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
+    application.add_handler(CommandHandler("link", link_command))
+    application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_link))
+    application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_video_for_link))
+    application.add_handler(CommandHandler("newfile", newfile_command))
+    application.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_for_newfile))
+    application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_video_for_newfile))
+    application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("broadcast", broadcast))
+    application.add_handler(CommandHandler("schedule", schedule))
+    application.add_handler(CommandHandler("listschedule", listschedule))
+    application.add_handler(CommandHandler("cancelschedule", cancelschedule))
+    application.add_handler(CommandHandler("delete", delete_file))
+    application.add_handler(CommandHandler("deleteall", deleteall))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CommandHandler("mute", mute))
+    application.add_handler(CommandHandler("unmute", unmute))
+    application.add_handler(CommandHandler("migratedb", migratedb_command))
+    application.add_handler(CommandHandler("migrate_status", migrate_status_command))
+    application.add_handler(CommandHandler("relinkdb", relinkdb_command))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
+    application.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+    return application
+
+
+# The live Application is built per-token inside run_bot() so a spare token can
+# take over without restarting the process. Nothing reads a module-level
+# `application` anymore.
 
 # ---------- Polling ----------
+def _activate_token(token, username):
+    """Point the module globals at the token we are about to run with."""
+    global TOKEN, BOT_USERNAME
+    TOKEN = token
+    if username:
+        BOT_USERNAME = username
+
+
 def run_bot():
+    """Run the bot, failing over to spare tokens (TELEGRAM_TOKEN_2, _3, ...).
+
+    A revoked/banned/deleted bot raises InvalidToken/Unauthorized on get_me();
+    we then rotate to the next spare. Transient errors retry the same token.
+    Data (Mongo + DB channel) is token-independent, so users/movies survive.
+    """
+    pairs = _load_token_pairs()
+    if not pairs:
+        logger.error("No TELEGRAM_TOKEN configured. Set TELEGRAM_TOKEN.")
+        return
+
+    idx = 0
+    fails = 0
     while True:
+        token, username = pairs[idx % len(pairs)]
+        _activate_token(token, username)
+        label = f"token #{idx % len(pairs) + 1}/{len(pairs)}"
         try:
+            app = build_application(token)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(set_commands(application))
-            loop.run_until_complete(_log_notify_channel_status(application.bot))
-            logger.info("Starting bot polling...")
+            loop.run_until_complete(set_commands(app))
+            loop.run_until_complete(_log_notify_channel_status(app.bot))
+            logger.info("Starting bot polling with %s...", label)
             # drop_pending_updates: never replay stale queued updates after a
             # restart, otherwise old forwarded movies get reposted/redelivered.
             # allowed_updates MUST include chat_member or Telegram never sends
             # the channel join/leave notifications (PTB takes it here, not on
             # the builder).
-            application.run_polling(
+            app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
             )
+            # Normal shutdown (SIGTERM / SIGINT): do not auto-restart.
+            logger.info("Bot polling stopped normally with %s.", label)
+            return
+        except (InvalidToken, Unauthorized) as e:
+            fails += 1
+            logger.error("Token %s is invalid/revoked: %s -> trying next token", label, e)
+            idx += 1
+            # All spares dead: back off instead of hot-looping.
+            if fails >= len(pairs):
+                logger.error("All %d token(s) failed. Retrying in 60s.", len(pairs))
+                time.sleep(60)
+                fails = 0
+            continue
         except Exception as e:
-            logger.exception(f"Bot polling crashed: {e}. Restarting in 10s")
-            import time
+            logger.exception(f"Bot polling crashed ({label}): {e}. Retrying in 10s")
             time.sleep(10)
 
 def run_flask():
