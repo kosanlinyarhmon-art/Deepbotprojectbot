@@ -1863,11 +1863,16 @@ def build_application(token):
 # The live Application is built per-token so several bots can run at once.
 
 # ---------- Polling ----------
-def _bot_prepare(app, label):
-    """Validate the token, set the command menu and log channel-admin status."""
+def _bot_prepare(app, label, loop):
+    """Validate the token, set the command menu and log channel-admin status.
+
+    Runs on the SAME loop that run_polling() will use (PTB reuses the thread's
+    current event loop). Using a separate asyncio.run() loop here would bind the
+    bot's HTTP client to a different loop and break polling.
+    """
     async def _prepare():
-        # Raises InvalidToken/Unauthorized for a dead token so the caller can
-        # give up on this bot instead of retrying forever.
+        # Raises InvalidToken for a dead token so the caller can give up on this
+        # bot instead of retrying forever.
         await app.bot.get_me()
         try:
             await set_commands(app)
@@ -1878,7 +1883,7 @@ def _bot_prepare(app, label):
         except Exception as e:
             logger.warning("%s channel status check failed: %s", label, e)
 
-    asyncio.run(_prepare())
+    loop.run_until_complete(_prepare())
 
 
 def _run_bot_thread(token, label):
@@ -1891,7 +1896,9 @@ def _run_bot_thread(token, label):
     while True:
         app = build_application(token)
         try:
-            _bot_prepare(app, label)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _bot_prepare(app, label, loop)
             logger.info("Starting bot polling (%s)...", label)
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
