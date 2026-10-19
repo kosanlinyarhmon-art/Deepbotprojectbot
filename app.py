@@ -1441,6 +1441,217 @@ async def migrate_status_command(update: Update, context: ContextTypes.DEFAULT_T
         f"⏹️ Migration မလုပ်ဖြစ်သေးပါ။\n"
         f"Done groups (file+mongo progress): {len(prog.done)}")
 
+# ---------- Relink old DB-channel files (survive bot token swap) ----------
+# Telegram file_ids are bot-specific. Files uploaded before message_ids were
+# stored cannot be sent by a NEW bot. This scans the database channel and links
+# each existing file_store entry to the channel message that holds its media, so
+# copy_message can deliver it from any bot.
+RELINK_STATE = {"running": False, "started": ""}
+_relink_col = db["relink_progress"]
+
+
+def _norm_match(text):
+    """Normalize a filename/caption so DB-channel text and file_store entries
+    compare consistently (credit, URLs, digits and punctuation removed)."""
+    if not text:
+        return ""
+    t = strip_notice(text)
+    if UPLOAD_CREDIT:
+        t = t.replace(UPLOAD_CREDIT, " ")
+    t = re.sub(r'\(\s*upload(?:ed)?\s*(?:by)?[^)]*\)', ' ', t, flags=re.I)
+    t = re.sub(r'https?://\S+', ' ', t, flags=re.I)
+    t = to_ascii_digits(t).lower()
+    t = re.sub(r'[^0-9a-z\u1000-\u109f]+', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+def _take_match(cands, key, used):
+    if not key:
+        return None
+    lst = cands.get(key)
+    while lst:
+        item = lst.pop(0)
+        if item not in used:
+            used.add(item)
+            return item
+    return None
+
+
+async def _with_flood(fn, attempts=30):
+    for attempt in range(attempts):
+        try:
+            return await fn()
+        except TelegramError as e:
+            low = str(e).lower()
+            if "flood" in low or "retry" in low:
+                wait = getattr(e, "retry_after", None) or 10 * (attempt + 1)
+                logger.warning("relink flood, waiting %ss: %s", wait, e)
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
+def _relink_worker(chat_id, dry, start_id=None, end_id=None, limit=0):
+    from telegram import Bot as _Bot
+    bot = _Bot(TOKEN)
+    RELINK_STATE["running"] = True
+    RELINK_STATE["started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    async def send(text):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+        except Exception as e:
+            logger.warning("relink notify failed: %s", e)
+
+    async def main():
+        if not DATABASE_CHANNEL_ID:
+            await send("❌ DATABASE_CHANNEL_ID မသတ်မှတ်ထားပါ။")
+            return
+        db_chat = int(DATABASE_CHANNEL_ID.strip())
+        scratch = chat_id
+
+        # Index every still-unlinked file by its normalized caption/filename.
+        cands = {}
+        used = set()
+        total_files = linked_already = 0
+        for doc in file_store_collection.find({}):
+            payload = doc.get("payload")
+            for f in doc.get("files", []):
+                total_files += 1
+                if f.get("channel_message_id"):
+                    linked_already += 1
+                    continue
+                item = (payload, f.get("file_id"))
+                name = f.get("file_name") or ""
+                stem = os.path.splitext(name)[0] if name else ""
+                for raw in (name, stem, f.get("file_caption")):
+                    k = _norm_match(raw)
+                    if k:
+                        cands.setdefault(k, []).append(item)
+
+        unlinked = total_files - linked_already
+        if not unlinked:
+            await send("✅ ဖိုင်အားလုံးမှာ message_id ရှိပြီးသားပါ။ relink မလိုပါ။")
+            return
+
+        latest = end_id
+        if not latest:
+            probe = await bot.send_message(chat_id=db_chat, text="🔗 relink probe")
+            latest = probe.message_id
+            try:
+                await bot.delete_message(chat_id=db_chat, message_id=latest)
+            except Exception:
+                pass
+
+        start = start_id
+        if not start:
+            saved = _relink_col.find_one({"_id": "cursor"})
+            start = int(saved["next_id"]) if saved and saved.get("next_id") else 1
+        start = max(1, int(start))
+        limit = int(limit or 0)
+
+        await send(
+            f"🔗 Relink စတင်ပါပြီ ({'DRY-RUN' if dry else 'RUN'})\n"
+            f"IDs {start}..{latest} | unlinked={unlinked} "
+            f"(already linked={linked_already})")
+
+        matched = scanned = 0
+        last_report = 0
+        cursor = start
+        for mid in range(start, latest + 1):
+            if limit and scanned >= limit:
+                break
+            scanned += 1
+            cursor = mid
+            try:
+                m = await _with_flood(lambda: bot.forward_message(
+                    chat_id=scratch, from_chat_id=db_chat, message_id=mid,
+                    disable_notification=True))
+            except TelegramError:
+                continue
+            if m is None:
+                continue
+            try:
+                await bot.delete_message(chat_id=scratch, message_id=m.message_id)
+            except TelegramError:
+                pass
+
+            media = m.document or m.video or m.audio
+            if not media:
+                continue
+            name = getattr(media, "file_name", None) or ""
+            stem = os.path.splitext(name)[0] if name else ""
+            item = None
+            for raw in (name, stem, m.caption or ""):
+                item = _take_match(cands, _norm_match(raw), used)
+                if item:
+                    break
+            if not item:
+                continue
+            matched += 1
+            if not dry:
+                set_file_channel_message(item[0], item[1], m.message_id)
+            if not dry and mid % 100 == 0:
+                _relink_col.update_one(
+                    {"_id": "cursor"}, {"$set": {"next_id": mid}}, upsert=True)
+            if scanned - last_report >= 200:
+                last_report = scanned
+                await send(
+                    f"⏳ relink: scanned={scanned}, matched={matched}, id={mid}")
+
+        if not dry:
+            _relink_col.update_one(
+                {"_id": "cursor"}, {"$set": {"next_id": cursor}}, upsert=True)
+        await send(
+            f"✅ Relink {'DRY-RUN ' if dry else ''}ပြီးပါပြီ။\n"
+            f"scanned={scanned}, matched={matched}, "
+            f"already_linked={linked_already}, unlinked_before={unlinked}")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except Exception as e:
+        logger.exception("relink failed")
+        try:
+            loop.run_until_complete(
+                send(f"❌ relink failed: {type(e).__name__}: {e}"))
+        except Exception:
+            pass
+    finally:
+        RELINK_STATE["running"] = False
+        loop.close()
+
+
+async def relinkdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
+        return
+    if RELINK_STATE["running"]:
+        await update.message.reply_text(
+            f"⚠️ Relink လုပ်နေဆဲပါ, started {RELINK_STATE['started']}")
+        return
+    args = context.args or []
+    dry = "run" not in args
+    nums = [int(a) for a in args if a.isdigit()]
+    start_id = nums[0] if len(nums) >= 1 else None
+    end_id = nums[1] if len(nums) >= 2 else None
+    limit = 0
+    for a in args:
+        if a.startswith("limit=") and a.split("=")[1].isdigit():
+            limit = int(a.split("=")[1])
+    threading.Thread(
+        target=_relink_worker,
+        args=(update.effective_user.id, dry, start_id, end_id, limit),
+        daemon=True).start()
+    await update.message.reply_text(
+        f"🔗 relinkdb စတင်ပါပြီ ({'DRY-RUN' if dry else 'RUN'})။\n"
+        f"• ပထမ `/relinkdb` (dry) နဲ့ စမ်းပါ — ဘယ်နှခု match လဲ ကြည့်ပါ။\n"
+        f"• ကောင်းရင် `/relinkdb run` နဲ့ တကယ်ရေးပါ။\n"
+        f"• အပိုင်းလိုက်: `/relinkdb run <start> <end>` ဥပမာ `/relinkdb run 1 2000`\n"
+        f"ပြီးတဲ့အခါ ဒီ chat ထဲ status ပြန်ပို့ပါမယ်။")
+
+
 # ---------- Set Bot Commands ----------
 async def set_commands(application: Application):
     await application.bot.set_my_commands([
@@ -1455,7 +1666,8 @@ async def set_commands(application: Application):
         ("mute", "Maintenance mode ဖွင့်ရန်"),
         ("unmute", "Maintenance mode ပိတ်ရန်"),
         ("migratedb", "DB channel သို့ movies migrate လုပ်ရန် (Admin)"),
-        ("migrate_status", "Migration status ကြည့်ရန် (Admin)")
+        ("migrate_status", "Migration status ကြည့်ရန် (Admin)"),
+        ("relinkdb", "ဖိုင်ဟောင်းတွေကို DB channel နဲ့ ပြန်ချိတ်ရန် (Admin)")
     ])
 
 # ---------- Channel member join/leave notifications ----------
@@ -1611,6 +1823,7 @@ application.add_handler(CommandHandler("mute", mute))
 application.add_handler(CommandHandler("unmute", unmute))
 application.add_handler(CommandHandler("migratedb", migratedb_command))
 application.add_handler(CommandHandler("migrate_status", migrate_status_command))
+application.add_handler(CommandHandler("relinkdb", relinkdb_command))
 application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
 application.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
