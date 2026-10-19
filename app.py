@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError, InvalidToken, Unauthorized
+from telegram.error import TelegramError, InvalidToken
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
@@ -629,7 +629,7 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
                 caption = update.message.caption
                 file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
                 save_file_info(payload, video.file_id, file_name, extract_movie_name(caption) or caption or None)
-                deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+                deep_link = create_deep_linked_url(context.bot.username, payload)
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
                     f"{deep_link}\n\n"
@@ -661,7 +661,7 @@ async def handle_video_for_newfile(update: Update, context: ContextTypes.DEFAULT
                 caption = update.message.caption
                 file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
                 save_file_info(payload, video.file_id, file_name, extract_movie_name(caption) or caption or None)
-                deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+                deep_link = create_deep_linked_url(context.bot.username, payload)
                 await update.message.reply_text(
                     f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
                     f"{deep_link}\n\n"
@@ -719,7 +719,7 @@ async def batch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payload = generate_payload()
     for f in files:
         save_file_info(payload, f['file_id'], f['file_name'], f.get('original_caption') or None)
-    deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+    deep_link = create_deep_linked_url(context.bot.username, payload)
     file_names = "\n".join([f"🎬 {f['file_name']}" for f in files])
 
     datab_report = ""
@@ -930,7 +930,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = generate_payload()
         for v in videos:
             save_file_info(payload, v['file_id'], v['file_name'], v.get('original_caption') or None)
-        deep_link = create_deep_linked_url(BOT_USERNAME, payload)
+        deep_link = create_deep_linked_url(context.bot.username, payload)
         file_names = "\n".join([f"🎬 {v['file_name']}" for v in videos])
         total = len(videos)
 
@@ -1388,9 +1388,9 @@ from migrate_db import run_migration as _run_db_migration, Progress as _DbProgre
 
 MIGRATION_STATE = {"type": None, "running": False, "started": ""}
 
-def _db_migration_worker(chat_id, dry, limit):
+def _db_migration_worker(chat_id, dry, limit, token=None):
     from telegram import Bot as _Bot
-    bot = _Bot(TOKEN)
+    bot = _Bot(token or TOKEN)
     MIGRATION_STATE["running"] = True
     MIGRATION_STATE["type"] = "db"
     MIGRATION_STATE["started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1444,7 +1444,7 @@ async def migratedb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit = int(a.split("=")[1])
     mode = "DRY-RUN" if dry else f"real run (limit={limit or 'all'})"
     threading.Thread(target=_db_migration_worker,
-                     args=(update.effective_chat.id, dry, limit),
+                     args=(update.effective_chat.id, dry, limit, context.bot.token),
                      daemon=True).start()
     await update.message.reply_text(
         f"🚀 migratedb စတင်နေပါပြီ ({mode})။\n"
@@ -1516,9 +1516,9 @@ async def _with_flood(fn, attempts=30):
                 raise
 
 
-def _relink_worker(chat_id, dry, start_id=None, end_id=None, limit=0):
+def _relink_worker(chat_id, dry, start_id=None, end_id=None, limit=0, token=None):
     from telegram import Bot as _Bot
-    bot = _Bot(TOKEN)
+    bot = _Bot(token or TOKEN)
     RELINK_STATE["running"] = True
     RELINK_STATE["started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1667,7 +1667,7 @@ async def relinkdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limit = int(a.split("=")[1])
     threading.Thread(
         target=_relink_worker,
-        args=(update.effective_user.id, dry, start_id, end_id, limit),
+        args=(update.effective_user.id, dry, start_id, end_id, limit, context.bot.token),
         daemon=True).start()
     await update.message.reply_text(
         f"🔗 relinkdb စတင်ပါပြီ ({'DRY-RUN' if dry else 'RUN'})။\n"
@@ -1860,69 +1860,106 @@ def build_application(token):
     return application
 
 
-# The live Application is built per-token inside run_bot() so a spare token can
-# take over without restarting the process. Nothing reads a module-level
-# `application` anymore.
+# The live Application is built per-token so several bots can run at once.
 
 # ---------- Polling ----------
-def _activate_token(token, username):
-    """Point the module globals at the token we are about to run with."""
-    global TOKEN, BOT_USERNAME
-    TOKEN = token
-    if username:
-        BOT_USERNAME = username
+def _bot_prepare(app, label):
+    """Validate the token, set the command menu and log channel-admin status."""
+    async def _prepare():
+        # Raises InvalidToken/Unauthorized for a dead token so the caller can
+        # give up on this bot instead of retrying forever.
+        await app.bot.get_me()
+        try:
+            await set_commands(app)
+        except Exception as e:
+            logger.warning("%s set_my_commands failed: %s", label, e)
+        try:
+            await _log_notify_channel_status(app.bot)
+        except Exception as e:
+            logger.warning("%s channel status check failed: %s", label, e)
+
+    asyncio.run(_prepare())
+
+
+def _run_bot_thread(token, label):
+    """Poll one bot in its own thread + event loop.
+
+    stop_signals=None: signal handlers may only be installed from the main
+    thread, so background bots are stopped when the process exits. A dead
+    token only kills that bot, leaving the other bots running.
+    """
+    while True:
+        app = build_application(token)
+        try:
+            _bot_prepare(app, label)
+            logger.info("Starting bot polling (%s)...", label)
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                stop_signals=None,
+            )
+            logger.info("Bot polling stopped (%s).", label)
+            return
+        except InvalidToken as e:
+            logger.error("Token for %s is invalid/revoked: %s. Giving up on this bot.",
+                         label, e)
+            return
+        except Exception as e:
+            logger.exception("Bot polling crashed (%s): %s. Restarting in 10s",
+                             label, e)
+            time.sleep(10)
 
 
 def run_bot():
-    """Run the bot, failing over to spare tokens (TELEGRAM_TOKEN_2, _3, ...).
+    """Run the bot(s).
 
-    A revoked/banned/deleted bot raises InvalidToken/Unauthorized on get_me();
-    we then rotate to the next spare. Transient errors retry the same token.
-    Data (Mongo + DB channel) is token-independent, so users/movies survive.
+    * 1 token  -> a single bot in the main thread (graceful SIGTERM handling).
+    * 2+ tokens (TELEGRAM_TOKEN_2, _3, ...) -> every bot runs SIMULTANEOUSLY,
+      each in its own thread with its own event loop. All of them share the
+      same Mongo data and movie channels, so each one serves its own users.
     """
     pairs = _load_token_pairs()
     if not pairs:
         logger.error("No TELEGRAM_TOKEN configured. Set TELEGRAM_TOKEN.")
         return
 
-    idx = 0
-    fails = 0
-    while True:
-        token, username = pairs[idx % len(pairs)]
-        _activate_token(token, username)
-        label = f"token #{idx % len(pairs) + 1}/{len(pairs)}"
-        try:
-            app = build_application(token)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(set_commands(app))
-            loop.run_until_complete(_log_notify_channel_status(app.bot))
-            logger.info("Starting bot polling with %s...", label)
-            # drop_pending_updates: never replay stale queued updates after a
-            # restart, otherwise old forwarded movies get reposted/redelivered.
-            # allowed_updates MUST include chat_member or Telegram never sends
-            # the channel join/leave notifications (PTB takes it here, not on
-            # the builder).
-            app.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-            )
-            # Normal shutdown (SIGTERM / SIGINT): do not auto-restart.
-            logger.info("Bot polling stopped normally with %s.", label)
-            return
-        except (InvalidToken, Unauthorized) as e:
-            fails += 1
-            logger.error("Token %s is invalid/revoked: %s -> trying next token", label, e)
-            idx += 1
-            # All spares dead: back off instead of hot-looping.
-            if fails >= len(pairs):
-                logger.error("All %d token(s) failed. Retrying in 60s.", len(pairs))
-                time.sleep(60)
-                fails = 0
-            continue
-        except Exception as e:
-            logger.exception(f"Bot polling crashed ({label}): {e}. Retrying in 10s")
-            time.sleep(10)
+    if len(pairs) == 1:
+        token, _username = pairs[0]
+        app = build_application(token)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(set_commands(app))
+        loop.run_until_complete(_log_notify_channel_status(app.bot))
+        logger.info("Starting bot polling...")
+        # drop_pending_updates: never replay stale queued updates after a
+        # restart, otherwise old forwarded movies get reposted/redelivered.
+        # allowed_updates MUST include chat_member or Telegram never sends
+        # the channel join/leave notifications (PTB takes it here, not on
+        # the builder).
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+        logger.info("Bot polling stopped normally.")
+        return
+
+    logger.info("Running %d bots SIMULTANEOUSLY.", len(pairs))
+    threads = []
+    for i, (token, username) in enumerate(pairs, start=1):
+        label = f"bot {i}/{len(pairs)} @{username or '?'}"
+        t = threading.Thread(target=_run_bot_thread, args=(token, label), daemon=True)
+        t.start()
+        threads.append(t)
+        # Stagger starts so the bots do not all hit Telegram at once.
+        time.sleep(3)
+
+    # Flask is already serving in its own thread; keep the main thread alive.
+    try:
+        while any(t.is_alive() for t in threads):
+            time.sleep(30)
+        logger.error("All bot threads have exited.")
+    except KeyboardInterrupt:
+        logger.info("Interrupted; shutting down.")
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
