@@ -708,8 +708,128 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['waiting_for_video_link'] = True
 
 
+async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.user_data.get('waiting_for_video_link'):
+        return
+    video = update.message.video or update.message.document
+    if not video:
+        await update.message.reply_text("ဖိုင် တစ်ခု ပို့ပေးပါ။")
+        return
 
-# ---------- ===================== /newfile Command ===================== ----------
+    try:
+        payload = generate_payload()
+        caption = update.message.caption
+        original_name = get_original_filename(video)
+        poster_caption = context.user_data.get('caption_full', '')
+
+        script_first_line = ""
+        if poster_caption:
+            lines = [ln.strip() for ln in poster_caption.split('\n') if ln.strip()]
+            if lines:
+                script_first_line = clean_file_name(re.sub(r'\s+', ' ', lines[0]).strip())
+
+        quality = extract_quality(caption) or extract_quality(original_name)
+        se = find_season_episode(original_name) or find_season_episode(caption) or find_season_episode(script_first_line)
+
+        movie_caption = ""
+        file_name = ""
+
+        if caption and caption.strip():
+            base_cap = caption.strip()
+            if se and not find_season_episode(base_cap):
+                base_cap = f"{base_cap} {se}".strip()
+            if quality and not extract_quality(base_cap):
+                base_cap = f"{base_cap} {quality}".strip()
+            movie_caption = base_cap
+            file_name = preserve_extension(base_cap)
+        else:
+            caption_movie_name = extract_movie_name(caption) if caption else ""
+            clean_original = ""
+            if original_name and not original_name.lower().startswith(('movie', 'video_')):
+                clean_original = original_name
+            caption_is_myanmar = bool(caption and re.search(r'[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]', to_ascii_digits(caption)))
+            script_name = clean_caption_text_only(script_first_line) if script_first_line else ""
+            if caption_is_myanmar and script_name:
+                file_name = script_name
+                movie_caption = script_name
+            elif caption_movie_name:
+                file_name = caption_movie_name
+                movie_caption = caption_movie_name
+            elif clean_original:
+                file_name = clean_original
+                movie_caption = clean_original
+            elif script_first_line:
+                file_name = script_first_line
+                movie_caption = script_first_line
+            else:
+                file_name = get_video_name(video, None, None, "ဇာတ်ကား")
+                movie_caption = file_name
+
+            if se and not find_season_episode(movie_caption):
+                movie_caption = f"{movie_caption} {se}".strip()
+            if se and not find_season_episode(file_name):
+                file_name = f"{file_name} {se}".strip()
+            if quality and not extract_quality(movie_caption):
+                movie_caption = f"{movie_caption} {quality}".strip()
+                file_name = f"{file_name} {quality}".strip()
+            file_name = preserve_extension(file_name)
+
+        movie_caption = clean_caption_text_only(movie_caption)
+        save_file_info(payload, video.file_id, file_name, movie_caption or None)
+
+        datab_report = ""
+        if DATABASE_CHANNEL_ID:
+            db_chat = int(DATABASE_CHANNEL_ID.strip())
+            try:
+                clean_cap = clean_caption(movie_caption or f"🎬 {file_name}")
+                clean_cap = append_upload_credit(clean_cap)
+                if len(clean_cap) > 1024:
+                    clean_cap = clean_cap[:1020].rstrip() + "..."
+                sent_db = None
+                for attempt in range(3):
+                    try:
+                        sent_db = await context.bot.send_document(
+                            chat_id=db_chat,
+                            document=video.file_id,
+                            filename=original_name or file_name,
+                            caption=clean_cap,
+                        )
+                        break
+                    except TelegramError as e:
+                        if "flood" in str(e).lower() or "retry" in str(e).lower():
+                            await asyncio.sleep(10 * (attempt + 1))
+                            continue
+                        raise
+                if sent_db is not None:
+                    set_file_channel_message(payload, video.file_id, sent_db.message_id)
+                datab_report = "\n\n🗄️ DB Channel ထဲသိမ်းပြီးပါပြီ။"
+            except Exception as e:
+                datab_report = "\n\n⚠️ DB Channel ထဲသိမ်းရာတွင် အမှားဖြစ်နေပါသည်။"
+                logger.error(f"/link DB post failed: {e}")
+        else:
+            datab_report = "\n\n⚠️ DATABASE_CHANNEL_ID မရှိပါ။"
+
+        deep_link = create_deep_linked_url(context.bot.username, payload)
+        try:
+            await update.message.reply_text(
+                f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
+                f"{deep_link}\n\n"
+                f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
+                f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်。"
+                f"{datab_report}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send link reply: {e}")
+            try:
+                await update.message.reply_text(f"✅ Link ထုတ်ပြီးပါပြီ\n\n{deep_link}")
+            except Exception as e2:
+                logger.error(f"Failed to send fallback link: {e2}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
+    finally:
+        context.user_data.pop('waiting_for_video_link', None)
 
 
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
