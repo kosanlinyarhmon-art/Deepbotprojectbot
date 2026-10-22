@@ -832,6 +832,10 @@ async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('waiting_for_video_link', None)
 
 
+# ---------- ===================== /batchlink Command ===================== ----------
+BATCH_WAITING_FILES, BATCH_DONE = range(2)
+
+
 async def batchlink_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ သင်သည် Admin မဟုတ်ပါ။")
