@@ -710,26 +710,53 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_video_for_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if context.user_data.get('waiting_for_video_link'):
-        video = update.message.video or update.message.document
-        if video:
+    if not context.user_data.get('waiting_for_video_link'):
+        return
+    video = update.message.video or update.message.document
+    if not video:
+        await update.message.reply_text("ဖိုင် တစ်ခု ပို့ပေးပါ။")
+        return
+    try:
+        payload = generate_payload()
+        caption = update.message.caption
+        original_name = get_original_filename(video)
+        file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
+        save_file_info(payload, video.file_id, file_name, extract_movie_name(caption) or caption or None)
+
+        datab_report = ""
+        if DATABASE_CHANNEL_ID:
             try:
-                payload = generate_payload()
-                caption = update.message.caption
-                file_name = get_video_name(video, caption, None, "ဇာတ်ကား")
-                save_file_info(payload, video.file_id, file_name, extract_movie_name(caption) or caption or None)
-                deep_link = create_deep_linked_url(context.bot.username, payload)
-                await update.message.reply_text(
-                    f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
-                    f"{deep_link}\n\n"
-                    f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
-                    f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
+                clean_cap = clean_caption(
+                    extract_movie_name(caption) or caption or f"🎬 {file_name}")
+                clean_cap = append_upload_credit(clean_cap)
+                if len(clean_cap) > 1024:
+                    clean_cap = clean_cap[:1020].rstrip() + "..."
+                sent_db = await context.bot.send_document(
+                    chat_id=int(DATABASE_CHANNEL_ID.strip()),
+                    document=video.file_id,
+                    filename=original_name or file_name,
+                    caption=clean_cap,
                 )
-            except Exception as e:
-                await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
-            context.user_data.pop('waiting_for_video_link', None)
+                set_file_channel_message(payload, video.file_id, sent_db.message_id)
+                datab_report = "\n\n🗄️ DB Channel ထဲ သိမ်းပြီးပါပြီ။"
+            except Exception as db_err:
+                logger.error(f"/link DB post failed: {db_err}")
+                datab_report = "\n\n⚠️ DB Channel ထဲ မသိမ်းနိုင်ပါ။"
         else:
-            await update.message.reply_text("ဖိုင် တစ်ခု ပို့ပေးပါ။")
+            datab_report = "\n\n⚠️ DATABASE_CHANNEL_ID မရှိပါ။"
+
+        deep_link = create_deep_linked_url(context.bot.username, payload)
+        await update.message.reply_text(
+            f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
+            f"{deep_link}\n\n"
+            f"ဤလင့်ကို နှိပ်လိုက်ရုံဖြင့် ({file_name}) ကို ချက်ချင်းရရှိမည်။\n"
+            f"မှတ်ချက် - Channel Member များသာ ရယူနိုင်ပါမည်။"
+            f"{datab_report}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Deep Link ထုတ်ရာတွင် အမှား: {str(e)}")
+    finally:
+        context.user_data.pop('waiting_for_video_link', None)
 
 # ---------- ===================== /newfile Command ===================== ----------
 async def newfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
