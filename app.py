@@ -189,6 +189,42 @@ if DATABASE_CHANNEL_ID:
 # Channels whose member join/leave we report to the admins (movie channels).
 NOTIFY_CHANNEL_IDS = set(MOVIE_CHANNEL_IDS)
 
+# ---------- Hard channel blocklist ----------
+# Channels this bot must NEVER post to, whatever the environment says.
+# -1003792838735 = https://t.me/everyboyhobby
+# The owner does not want this bot posting there, so the ID is filtered out of
+# every target list at startup (CHANNEL_IDS / CHANNEL_ID / DATABASE_CHANNEL_ID).
+# Set BLOCKED_CHANNEL_IDS="" to disable the block again.
+BLOCKED_CHANNEL_IDS = {
+    int(x.strip())
+    for x in os.environ.get("BLOCKED_CHANNEL_IDS", "-1003792838735").split(",")
+    if x.strip()
+}
+
+_movie_before = list(MOVIE_CHANNEL_IDS)
+MOVIE_CHANNEL_IDS = [c for c in MOVIE_CHANNEL_IDS if c not in BLOCKED_CHANNEL_IDS]
+POST_CHANNEL_IDS = [c for c in POST_CHANNEL_IDS if c not in BLOCKED_CHANNEL_IDS]
+NOTIFY_CHANNEL_IDS = {c for c in NOTIFY_CHANNEL_IDS if c not in BLOCKED_CHANNEL_IDS}
+
+if DATABASE_CHANNEL_ID and int(DATABASE_CHANNEL_ID.strip()) in BLOCKED_CHANNEL_IDS:
+    logger.warning(
+        "DATABASE_CHANNEL_ID %s is blocked - DB channel posting disabled.",
+        DATABASE_CHANNEL_ID,
+    )
+    DATABASE_CHANNEL_ID = ""
+
+if _movie_before != MOVIE_CHANNEL_IDS:
+    logger.warning(
+        "Blocked channel(s) removed from movie targets: %s",
+        sorted(set(_movie_before) - set(MOVIE_CHANNEL_IDS)),
+    )
+logger.info(
+    "Effective movie channels: %s | DB channel: %r | blocked: %s",
+    MOVIE_CHANNEL_IDS,
+    DATABASE_CHANNEL_ID,
+    sorted(BLOCKED_CHANNEL_IDS),
+)
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
