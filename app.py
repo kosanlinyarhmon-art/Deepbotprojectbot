@@ -1571,6 +1571,48 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items):
         await _mig_publish_locked(context, key, items)
 
 
+async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
+                          photos, videos):
+    """Copy the migrated post's media into DATABASE_CHANNEL_ID (MyDatabasechannel)."""
+    if not DATABASE_CHANNEL_ID:
+        return False
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    ok = False
+    try:
+        for it in photos:
+            sent_db = await _with_flood(lambda: context.bot.send_photo(
+                chat_id=db_chat,
+                photo=it["file_id"],
+                caption=title[:1000],
+            ))
+            ok = True
+            logger.info("migration DB photo saved: %s id=%s", title,
+                        sent_db.message_id)
+        for it in videos:
+            cap = (it.get("caption") or title)[:1000]
+            try:
+                sent_db = await _with_flood(lambda: context.bot.send_video(
+                    chat_id=db_chat,
+                    video=it["file_id"],
+                    caption=cap,
+                    supports_streaming=True,
+                ))
+            except TelegramError:
+                sent_db = await _with_flood(lambda: context.bot.send_document(
+                    chat_id=db_chat,
+                    document=it["file_id"],
+                    filename=it["file_name"],
+                    caption=cap,
+                ))
+            set_file_channel_message(payload, it["file_id"], sent_db.message_id)
+            ok = True
+            logger.info("migration DB video saved: %s (%s) id=%s",
+                        it["file_name"], title, sent_db.message_id)
+    except Exception as exc:
+        logger.error("migration DB save failed (%s): %s", title, exc)
+    return ok
+
+
 async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str, items):
 
     title = _mig_title(items) or "🎬 ဇာတ်ကားအသစ်"
@@ -1623,12 +1665,15 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str, item
         "migration published '%s' (%d media) -> %s id=%s",
         title, len(items), AUTO_PUBLISH_CHANNEL, sent.message_id,
     )
+    db_ok = await _mig_save_to_db(context, payload, title, photos, videos)
     migrated_collection.update_one(
         {"_id": key},
         {"$set": {
             "done": True,
             "title": title,
             "post_id": sent.message_id,
+            "payload": payload,
+            "db_saved": bool(db_ok),
             "published_at": time.time(),
         }},
         upsert=True,
@@ -1717,6 +1762,96 @@ async def migrate_reset_command(update: Update, context: ContextTypes.DEFAULT_TY
     removed = migrated_collection.delete_many({}).deleted_count
     _mig_albums.clear()
     await update.message.reply_text(f"♻️ Migration state cleared ({removed} records).")
+
+
+async def dbsave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save a payload's stored files into DATABASE_CHANNEL_ID (MyDatabasechannel)."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args or not DATABASE_CHANNEL_ID:
+        await update.message.reply_text("Usage: /dbsave <payload>")
+        return
+    payload = context.args[0].strip()
+    files = get_file_info(payload)
+    if not files:
+        await update.message.reply_text("⚠️ payload not found.")
+        return
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    saved = skipped = failed = 0
+    for f in files:
+        if f.get("channel_message_id"):
+            skipped += 1
+            continue
+        cap = (f.get("file_caption") or "")[:1000]
+        try:
+            try:
+                sent_db = await _with_flood(lambda: context.bot.send_video(
+                    chat_id=db_chat,
+                    video=f["file_id"],
+                    caption=cap,
+                    supports_streaming=True,
+                ))
+            except TelegramError:
+                sent_db = await _with_flood(lambda: context.bot.send_document(
+                    chat_id=db_chat,
+                    document=f["file_id"],
+                    filename=f.get("file_name") or "movie.mp4",
+                    caption=cap,
+                ))
+            set_file_channel_message(payload, f["file_id"], sent_db.message_id)
+            saved += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning("dbsave failed for %s: %s", f.get("file_name"), exc)
+        await asyncio.sleep(1.5)
+    await update.message.reply_text(
+        f"🗄️ DB save\nsaved: {saved}\nskipped: {skipped}\nfailed: {failed}")
+
+
+async def dbfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Copy already-published migration posts into DATABASE_CHANNEL_ID."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not DATABASE_CHANNEL_ID or not AUTO_PUBLISH_CHANNEL:
+        await update.message.reply_text("⚠️ DATABASE_CHANNEL_ID / target not set.")
+        return
+    chat_id = update.effective_chat.id
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    docs = list(migrated_collection.find({
+        "post_id": {"$exists": True},
+        "db_saved": {"$ne": True},
+    }))
+    await update.message.reply_text(f"🗄️ Backfill start: {len(docs)} posts")
+
+    async def worker():
+        saved = failed = 0
+        for d in docs:
+            try:
+                await context.bot.copy_message(
+                    chat_id=db_chat,
+                    from_chat_id=AUTO_PUBLISH_CHANNEL,
+                    message_id=int(d["post_id"]),
+                )
+                migrated_collection.update_one(
+                    {"_id": d["_id"]}, {"$set": {"db_saved": True}})
+                saved += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning("dbfix failed post %s: %s", d.get("post_id"), exc)
+            if (saved + failed) % 20 == 0:
+                try:
+                    await context.bot.send_message(
+                        chat_id, f"🗄️ {saved + failed}/{len(docs)} ...")
+                except Exception:
+                    pass
+            await asyncio.sleep(1.6)
+        try:
+            await context.bot.send_message(
+                chat_id, f"✅ DB backfill done\nsaved: {saved}\nfailed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2420,6 +2555,8 @@ def build_application(token):
     application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_migrate_forward), group=-1)
     application.add_handler(CommandHandler("migrate_posts", migrate_posts_status))
     application.add_handler(CommandHandler("migrate_reset", migrate_reset_command))
+    application.add_handler(CommandHandler("dbsave", dbsave_command))
+    application.add_handler(CommandHandler("dbfix", dbfix_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
     application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
