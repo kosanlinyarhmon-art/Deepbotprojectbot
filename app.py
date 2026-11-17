@@ -1437,7 +1437,7 @@ _MIG_EP_MARK = re.compile(
     r"|\be\s*\d{1,3}\b"
     r")", re.I)
 _MIG_EP_NOISE = re.compile(
-    r"\b(?:end|completed?|final|uncut|extended|full|all)\b", re.I)
+    r"\b(?:end|completed?|final|uncut|extended|full|all|ep|episode)\b", re.I)
 # "ep 1 +2+3", "ep 7 to 10", "ep 4+5+6"
 _MIG_EP_LIST = re.compile(
     r"(?:\bep?\s*)?\b\d{1,3}\b(?:\s*(?:[+&,]|to|and|-|~)\s*\d{1,3}\b)+", re.I)
