@@ -2316,8 +2316,6 @@ async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not k:
             continue
         groups.setdefault(k, []).append(d)
-    groups = {k: v for k, v in groups.items() if len(v) > 1}
-
     # merge near-identical keys (source typos: "disenchanment" vs "disenchantment")
     import difflib
     keys = sorted(groups)
