@@ -2298,6 +2298,32 @@ async def migstat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines)[:3900])
 
 
+async def linkcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnose a published post: /linkcheck <part of title>."""
+    if not is_admin(update.effective_user.id):
+        return
+    q = " ".join(context.args or []).strip()
+    if not q:
+        await update.message.reply_text("Usage: /linkcheck <title စာသား>")
+        return
+    rx = re.compile(re.escape(q), re.I)
+    docs = list(migrated_collection.find({"title": rx}).limit(5))
+    if not docs:
+        await update.message.reply_text(f"🔍 '{q}' နဲ့ ကိုက်တဲ့ post မတွေ့ပါ")
+        return
+    lines = [f"🔍 {len(docs)} post တွေ့ပါ"]
+    for d in docs:
+        payload = d.get("payload") or ""
+        files = get_file_info(payload) if payload else []
+        have = sum(1 for f in files if f.get("channel_message_id"))
+        lines.append(
+            f"• id={d.get('post_id')} title={str(d.get('title'))[:40]!r}\n"
+            f"  payload={payload or 'NONE'}\n"
+            f"  files={len(files)} in_db_channel={have} "
+            f"db_saved={d.get('db_saved')} done={d.get('done')}")
+    await update.message.reply_text("\n".join(lines)[:3900])
+
+
 async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -3218,6 +3244,7 @@ def build_application(token):
     application.add_handler(CommandHandler("forwardstop", forwardstop_command))
     application.add_handler(CommandHandler("forwardstate", forwardstate_command))
     application.add_handler(CommandHandler("migstat", migstat_command))
+    application.add_handler(CommandHandler("linkcheck", linkcheck_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
