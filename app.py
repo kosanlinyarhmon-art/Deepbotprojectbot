@@ -2250,11 +2250,19 @@ async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     args = context.args or []
     cloud_forwarder.set_config(enabled=True)
-    if args and args[0].isdigit():
+    # /forwardstart <channel_id> <last_id>  -> reset one channel
+    # /forwardstart <last_id>              -> reset the first channel
+    if len(args) >= 2 and args[0].lstrip("-").isdigit() and args[1].isdigit():
+        ch = str(cloud_forwarder.to_entity_id(args[0]))
+        cloud_forwarder.state_col().update_one(
+            {"_id": ch},
+            {"$set": {"last_id": int(args[1])}, "$unset": {"done": ""}},
+            upsert=True)
+    elif args and args[0].isdigit():
         first = (cfg.get("sources") or cloud_forwarder.DEFAULT_SOURCES)[0]
         cloud_forwarder.state_col().update_one(
             {"_id": str(cloud_forwarder.to_entity_id(first))},
-            {"$set": {"last_id": int(args[0])}},
+            {"$set": {"last_id": int(args[0])}, "$unset": {"done": ""}},
             upsert=True)
     started = cloud_forwarder.start_in_background()
     if not started:
@@ -2271,6 +2279,23 @@ async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYP
     context.application.create_task(_delayed_start())
     await update.message.reply_text(
         "▶️ Cloud forwarder ၃၅ စက္ကန့်အတွင်း စတင်ပါမယ်။")
+
+
+async def migstat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Per-source migration counts + highest source message id already used."""
+    if not is_admin(update.effective_user.id):
+        return
+    lines = ["📊 Migrated posts per source"]
+    for src in sorted(SOURCE_CHANNEL_IDS):
+        n = migrated_collection.count_documents({"source": src})
+        top = list(migrated_collection.find(
+            {"source": src, "src_msg_id": {"$exists": True}}
+        ).sort("src_msg_id", -1).limit(1))
+        mx = top[0].get("src_msg_id") if top else 0
+        st = db["forward_state"].find_one({"_id": str(src)}) or {}
+        lines.append(f"{src}: posts={n} max_src_id={mx} "
+                     f"state_last={st.get('last_id')}")
+    await update.message.reply_text("\n".join(lines)[:3900])
 
 
 async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3192,6 +3217,7 @@ def build_application(token):
     application.add_handler(CommandHandler("forwardstart", forwardstart_command))
     application.add_handler(CommandHandler("forwardstop", forwardstop_command))
     application.add_handler(CommandHandler("forwardstate", forwardstate_command))
+    application.add_handler(CommandHandler("migstat", migstat_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
