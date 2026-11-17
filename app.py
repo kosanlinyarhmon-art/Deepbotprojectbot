@@ -3463,9 +3463,88 @@ async def _repair_posts(bot, limit=25):
     return fixed, reposted
 
 
+async def _dedupe_reposts(bot, hours=8):
+    """Clean up the duplicate copies made while API calls were timing out.
+
+    For every payload that has a recent repost: keep the OLDEST live post,
+    delete the extra copies, and make sure the keeper has the right caption
+    and the deep-link buttons. Nothing without ``reposted_at`` is deleted.
+    """
+    cutoff = time.time() - hours * 3600
+    docs = list(migrated_collection.find({"reposted_at": {"$gt": cutoff}}))
+    if not docs:
+        return 0, 0
+    payloads = {d.get("payload") for d in docs if d.get("payload")}
+    deleted = fixed = 0
+    for payload in payloads:
+        group = list(migrated_collection.find({
+            "payload": payload, "merged_into": {"$exists": False}}))
+        by_pid = {}
+        for d in group:
+            pid = d.get("post_id")
+            if pid:
+                by_pid.setdefault(int(pid), []).append(d)
+        if not by_pid:
+            continue
+        markup = _mig_keyboard(create_deep_linked_url(bot.username, payload))
+        alive = []
+        for pid in sorted(by_pid):
+            ok = False
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=AUTO_PUBLISH_CHANNEL, message_id=pid,
+                    reply_markup=markup)
+                ok = True
+            except BadRequest as exc:
+                ok = "not modified" in str(exc).lower()
+            except Exception:
+                ok = False
+            if ok:
+                alive.append(pid)
+            await asyncio.sleep(0.4)
+        if not alive:
+            continue
+        keep_id = alive[0]
+        keep = by_pid[keep_id][0]
+        for pid in alive[1:]:
+            try:
+                await bot.delete_message(AUTO_PUBLISH_CHANNEL, pid)
+                deleted += 1
+            except Exception:
+                pass
+            for d in by_pid[pid]:
+                migrated_collection.update_one(
+                    {"_id": d["_id"]},
+                    {"$set": {"merged_into": f"post:{keep_id}"}})
+            await asyncio.sleep(0.6)
+        caption = _mig_build_caption(
+            keep.get("title") or "", keep.get("synopsis") or "",
+            keep.get("seasons") or [], keep.get("eps") or [])
+        try:
+            await bot.edit_message_caption(
+                chat_id=AUTO_PUBLISH_CHANNEL, message_id=keep_id,
+                caption=caption)
+            fixed += 1
+        except Exception as exc:
+            logger.info("dedupe caption skipped %s: %s", keep_id, exc)
+        for d in by_pid[keep_id]:
+            migrated_collection.update_one(
+                {"_id": d["_id"]},
+                {"$set": {"post_id": keep_id, "button_id": keep_id,
+                          "caption": caption}})
+        await asyncio.sleep(0.6)
+    if deleted or fixed:
+        logger.info("dedupe reposts: deleted=%d fixed=%d", deleted, fixed)
+    return deleted, fixed
+
+
 async def _repair_once(bot):
     """Clean up the whole backlog right after a deploy, in small batches."""
     await asyncio.sleep(90)
+    try:
+        await _dedupe_reposts(bot)
+    except Exception as exc:
+        logger.warning("dedupe once failed: %s", exc)
     total_f = total_r = 0
     for _ in range(8):
         try:
