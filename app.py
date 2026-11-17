@@ -2252,9 +2252,20 @@ async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYP
             {"$set": {"last_id": int(args[0])}},
             upsert=True)
     started = cloud_forwarder.start_in_background()
+    if not started:
+        await update.message.reply_text(
+            "ℹ️ Forwarder run နေပြီးသား (/forwardstate ကြည့်ပါ)")
+        return
+
+    async def _delayed_start():
+        # wait so the admin's own client can disconnect first (two IPs with one
+        # session string would invalidate the auth key)
+        await asyncio.sleep(35)
+        cloud_forwarder.start_in_background()
+
+    context.application.create_task(_delayed_start())
     await update.message.reply_text(
-        "▶️ Cloud forwarder စတင်ပါပြီ။" if started
-        else "ℹ️ Forwarder run နေပြီးသား (/forwardstate ကြည့်ပါ)")
+        "▶️ Cloud forwarder ၃၅ စက္ကန့်အတွင်း စတင်ပါမယ်။")
 
 
 async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
