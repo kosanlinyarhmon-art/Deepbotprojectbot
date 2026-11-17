@@ -10,7 +10,10 @@ the run always continues from the last forwarded message.
 
 import asyncio
 import logging
+import os
 import time
+import urllib.parse
+import urllib.request
 
 from pymongo import MongoClient
 from telethon import TelegramClient
@@ -69,6 +72,21 @@ def log(msg):
     return line
 
 
+def notify(text):
+    """Send a progress note to the admin's Telegram via the bot API."""
+    token = os.environ.get("TELEGRAM_TOKEN", "")
+    if not token:
+        return
+    chat = str(config().get("admin_chat") or 1147922719)
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+    try:
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/sendMessage", data,
+            timeout=20)
+    except Exception:
+        pass
+
+
 def to_entity_id(raw):
     raw = str(raw).strip()
     if "t.me/c/" in raw:
@@ -104,13 +122,15 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay):
         log(f"== SKIP {title} (already finished)")
         return
     log(f"== START {title} ({source_id}) resume from id > {last_id}")
+    notify(f"🚚 စတင်ပါပြီ: {title}\nid {last_id} ကနေ ဆက်တင်နေတယ်")
 
     pending = []
     sent = 0
     chan_started = time.time()
+    last_note = time.time()
 
     async def flush():
-        nonlocal pending, sent
+        nonlocal pending, sent, last_note
         if not pending:
             return
         ids = [m.id for m in pending]
@@ -123,6 +143,10 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay):
                 upsert=True)
             sent += len(ids)
             log(f"   forwarded {len(ids)}: {ids[0]}..{ids[-1]} (total {sent})")
+            if time.time() - last_note > 900:
+                last_note = time.time()
+                notify(f"🚚 {title}\nid {max(ids)} အထိ တင်ပြီး "
+                       f"({sent} msg)\nဆက်လုပ်နေတယ်")
         except FloodWaitError as exc:
             log(f"   FloodWait {exc.seconds}s")
             await asyncio.sleep(exc.seconds + 5)
@@ -162,6 +186,7 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay):
         await drain(sent, chan_started, per_item)
         state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
         log(f"== DONE {title}")
+        notify(f"✅ ပြီးသွားပြီ: {title} ({sent} msg)")
 
 
 async def _run():
