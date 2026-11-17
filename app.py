@@ -1551,7 +1551,7 @@ _mig_series_photo = {}
 _MIG_PUBLISH_LOCK = asyncio.Lock()
 MIG_QUIET_PERIOD = 2.0
 MIG_QUIET_PHOTO = 6.5
-MIG_MAX_WAIT = 45.0
+MIG_MAX_WAIT = 120.0
 
 
 _MIG_EP_MARK = re.compile(
@@ -2322,6 +2322,30 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
                         photo_item["caption"].strip().split("\n", 1)[0],
                         item["caption"], item["file_name"])):
                 key = pk
+        if key is None:
+            # No poster, no episode marker: a release posted as several files
+            # in a row (episodes / quality mirrors) shares the caption title.
+            # Batch them into ONE post instead of one post per file.
+            my_title = _mig_clean_title(
+                (item["caption"] or "").strip().split("\n", 1)[0]
+                or item["file_name"] or "")
+            my_toks = _mig_series_tokens(my_title)
+            now_m = time.monotonic()
+            for k, e in list(_mig_albums.items()):
+                if e.get("src") != src or not e["items"]:
+                    continue
+                if now_m - e["last_update"] > 240:
+                    continue
+                if any(i["kind"] == "photo" for i in e["items"]):
+                    continue
+                first = e["items"][0]
+                t0 = _mig_clean_title(
+                    (first["caption"] or "").strip().split("\n", 1)[0]
+                    or first["file_name"] or "")
+                t0_toks = _mig_series_tokens(t0)
+                if (my_toks and t0_toks and my_toks == t0_toks):
+                    key = k
+                    break
         if key is None:
             key = f"{src}:m{src_msg_id or message.message_id}"
 
