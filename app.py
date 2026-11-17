@@ -1818,8 +1818,29 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
     payload = generate_payload()
     for it in videos:
         save_file_info(payload, it["file_id"], it["file_name"], title)
-    deep_link = create_deep_linked_url(context.bot.username, payload)
-    reply_markup = _mig_keyboard(deep_link)
+
+    # A post with no video has nothing to deliver: never attach a deep link
+    # (it would open the bot and say "invalid link").  If the source caption
+    # carried a channel link, point the button there instead.
+    source_link = ""
+    if not videos:
+        raw = " ".join((it.get("caption") or "") for it in items)
+        m = re.search(
+            r"(?:https?://)?t\.me/(?:c/\d+/\d+|\+[\w-]+|[\w_]{4,})(?:/\d+)?",
+            raw)
+        if m:
+            source_link = m.group(0)
+            if not source_link.startswith("http"):
+                source_link = "https://" + source_link
+
+    if videos:
+        deep_link = create_deep_linked_url(context.bot.username, payload)
+        reply_markup = _mig_keyboard(deep_link)
+    elif source_link:
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔗 ဒီလင့်ကနေ ကြည့်ရှုပါ", url=source_link)]])
+    else:
+        reply_markup = None
 
     header = "📝 ဇာတ်ကားအကြောင်း"
     caption = title
@@ -2322,6 +2343,41 @@ async def linkcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  files={len(files)} in_db_channel={have} "
             f"db_saved={d.get('db_saved')} done={d.get('done')}")
     await update.message.reply_text("\n".join(lines)[:3900])
+
+
+async def fixempty_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove broken deep-link buttons from posts that have no movie file."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not AUTO_PUBLISH_CHANNEL:
+        await update.message.reply_text("⚠️ target channel not set.")
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("🧹 ဖိုင်မရှိတဲ့ post တွေရဲ့ deeplink button ဖျက်နေတယ်...")
+
+    async def worker():
+        fixed = failed = 0
+        for d in migrated_collection.find({"post_id": {"$exists": True}}):
+            payload = d.get("payload")
+            files = get_file_info(payload) if payload else []
+            if files:
+                continue
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=AUTO_PUBLISH_CHANNEL,
+                    message_id=int(d["post_id"]),
+                    reply_markup=None)
+                fixed += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.8)
+        try:
+            await context.bot.send_message(
+                chat_id, f"✅ ပြီးပါပြီ\nbutton ဖျက်ပြီး: {fixed}\nfailed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
 
 
 async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3245,6 +3301,7 @@ def build_application(token):
     application.add_handler(CommandHandler("forwardstate", forwardstate_command))
     application.add_handler(CommandHandler("migstat", migstat_command))
     application.add_handler(CommandHandler("linkcheck", linkcheck_command))
+    application.add_handler(CommandHandler("fixempty", fixempty_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
