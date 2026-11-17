@@ -1396,13 +1396,15 @@ _MIG_JUNK = (
 # credit fragments that can sit inside a title line: "Savi (2024) (mmsub)Crd"
 _MIG_JUNK_STRIP = re.compile(
     r"(?:"
-    r"\bcrd\b|\bcredits?\b|"
-    r"\bmmsub\b|\bmm\s*sub\b|"
+    r"\bcrds?\b|\bcredits?\b|\bcrd\b|"
+    r"\bmmsubs?\b|\bmm\s*subs?\b|\bmyanmar\s*sub(?:title)?s?\b|"
+    r"\b(?:sub|subs|subtitle|subtitles)\s*(?:by|:)\b[^|,\n]*|"
     r"upload(?:ed)?\s*by\b[^|,\n]*|"
-    r"\bsub(?:title)?s?\s*by\b[^|,\n]*|"
-    r"\bencoded?\s*by\b[^|,\n]*|"
-    r"\bencod(?:e|ed|er|ing)\b"
+    r"encoded?\s*by\b[^|,\n]*|"
+    r"\bencod(?:e|ed|er|ing)\b|"
+    r"\bpowered\s*by\b[^|,\n]*"
     r")", re.I)
+_MIG_MENTION = re.compile(r"(?<!\w)@\w+")
 _MIG_EMPTY_BRACKETS = re.compile(r"[\(\[\{]\s*[\)\]\}]")
 _MIG_LABEL_ONLY = re.compile(
     r"(?i)(?:download|downloads|watch|watch\s*now|link|links|"
@@ -1492,6 +1494,18 @@ def _mig_same_movie(photo_title, video_caption, video_name):
     return len(pt & vt) / len(pt) >= 0.6
 
 
+def _mig_trim_brackets(ln):
+    """Drop unmatched brackets left behind after removing '(mmsub(Crd' etc."""
+    for op, cl in (("(", ")"), ("[", "]"), ("{", "}")):
+        while ln.count(op) > ln.count(cl) and op in ln:
+            i = ln.rfind(op)
+            ln = ln[:i] + " " + ln[i + 1:]
+        while ln.count(cl) > ln.count(op) and cl in ln:
+            i = ln.rfind(cl)
+            ln = ln[:i] + " " + ln[i + 1:]
+    return ln
+
+
 def clean_migrate_caption(text):
     """Drop credit / watermark / link / join-prompt lines, keep the rest."""
     if not text:
@@ -1499,7 +1513,9 @@ def clean_migrate_caption(text):
     keep = []
     for ln in text.replace("\r", "").split("\n"):
         ln = _MIG_JUNK_STRIP.sub(" ", ln)
+        ln = _MIG_MENTION.sub(" ", ln)
         ln = _MIG_EMPTY_BRACKETS.sub(" ", ln)
+        ln = _mig_trim_brackets(ln)
         ln = re.sub(r"\s{2,}", " ", ln).strip(" |-,:;·•")
         if any(p.search(ln) for p in _MIG_JUNK):
             continue
