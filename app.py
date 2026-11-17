@@ -236,11 +236,6 @@ _DEFAULT_SOURCES = [
     "-1002190088840",
     "-1002480433985",
     "-1002477764635",
-    "-1003928332092",
-    "-1002776075605",
-    "-1002263641762",
-    "-1001778227594",
-    "-1001624185250",
 ]
 SOURCE_CHANNEL_IDS = {
     int(x.strip())
@@ -263,6 +258,23 @@ if SOURCE_CHANNEL_IDS and AUTO_PUBLISH_CHANNEL:
         "Migration enabled: %d source channel(s) -> %s",
         len(SOURCE_CHANNEL_IDS), AUTO_PUBLISH_CHANNEL,
     )
+
+_MIG_EXTRA_CACHE = {"ts": 0.0, "ids": set()}
+
+
+def _mig_extra_sources():
+    """Channels the cloud forwarder joined from a link hub (cached 60s)."""
+    now = time.time()
+    if now - _MIG_EXTRA_CACHE["ts"] < 5:
+        return _MIG_EXTRA_CACHE["ids"]
+    try:
+        doc = db["config"].find_one({"_id": "migration"}) or {}
+        ids = {int(x) for x in (doc.get("extra_sources") or [])}
+    except Exception:
+        ids = set()
+    _MIG_EXTRA_CACHE.update(ts=now, ids=ids)
+    return ids
+
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -1485,6 +1497,101 @@ def _mig_series_key(item):
     return key
 
 
+# "Season 2", "s02", "#Season[ 3]"  (optional "to 4" / "-4" range tail)
+_MIG_SEASON_GET = re.compile(
+    r"(?i)\b(?:season|s)\s*[\[\(]?\s*(\d{1,2})"
+    r"((?:\s*(?:to|and|&|[-~–])\s*\d{1,2})*)")
+# "Ep 7", "EP[1 to 6]", "episode 3", "S01E04"  (optional "+2+3" / "to 6" tail)
+_MIG_EP_GET = re.compile(
+    r"(?i)(?:\b(?:episode|ep)|(?<=\d)e)\s*[\[\(]?\s*(\d{1,3})"
+    r"((?:\s*(?:[+&,]|to|and|[-~–])\s*\d{1,3})*)")
+_MIG_NUM = re.compile(r"\d{1,3}")
+
+
+def _mig_expand_nums(first, tail):
+    """'1' + ' to 6' -> [1..6];  '1' + '+2+3' -> [1,2,3]."""
+    nums = [int(first)]
+    if not tail:
+        return nums
+    extra = [int(x) for x in _MIG_NUM.findall(tail)]
+    if not extra:
+        return nums
+    lo, hi = nums[0], extra[0]
+    if re.search(r"(?i)\b(?:to|and)\b|[-~–]", tail) and 0 < hi - lo <= 40:
+        nums.extend(range(lo + 1, hi + 1))
+    nums.extend(extra)
+    return nums
+
+
+def _mig_eps_info(items):
+    """Season / episode numbers written in the source caption or file name."""
+    seasons, eps = set(), set()
+    for it in items:
+        raw = f"{it.get('caption') or ''} {it.get('file_name') or ''}"
+        for first, tail in _MIG_SEASON_GET.findall(raw):
+            seasons.update(_mig_expand_nums(first, tail))
+        for first, tail in _MIG_EP_GET.findall(raw):
+            eps.update(_mig_expand_nums(first, tail))
+    return seasons, eps
+
+
+def _mig_eps_fill(seasons, eps, videos, sdoc=None):
+    """Source has no season/episode marks: number the files in order.
+
+    Several files in one batch -> 1..N.  A single new file for an existing
+    series -> the next number after the ones already published.  A single file
+    with nothing known is left alone (it is probably a movie, not an episode).
+    """
+    if eps:
+        return seasons, eps
+    n = len(videos)
+    if n < 1:
+        return seasons, eps
+    base = 0
+    if sdoc is not None:
+        prev = {int(x) for x in (sdoc.get("eps") or [])}
+        base = max(prev) if prev else int(sdoc.get("episodes") or 0)
+    if n >= 2 or base:
+        eps = set(range(base + 1, base + 1 + n))
+    if eps and not seasons:
+        seasons = {1}
+    return seasons, eps
+
+
+def _mig_num_label(nums, limit=12):
+    nums = sorted({int(n) for n in nums})
+    if not nums:
+        return ""
+    if len(nums) == 1:
+        return str(nums[0])
+    if nums == list(range(nums[0], nums[-1] + 1)) or len(nums) > limit:
+        return f"{nums[0]}-{nums[-1]}"
+    return ", ".join(str(n) for n in nums)
+
+
+def _mig_eps_line(seasons, eps):
+    """'📺 Season 2 · Episode 7' / '📺 Episode 1-6' / '' when unknown."""
+    parts = []
+    s = _mig_num_label(seasons)
+    e = _mig_num_label(eps)
+    if s:
+        parts.append(f"Season {s}")
+    if e:
+        parts.append(f"Episode {e}")
+    return ("📺 " + " · ".join(parts)) if parts else ""
+
+
+def _mig_build_caption(title, synopsis, seasons=None, eps=None,
+                       max_len=1024):
+    cap = title
+    line = _mig_eps_line(seasons or (), eps or ())
+    if line:
+        cap += f"\n{line}"
+    if synopsis:
+        cap += f"\n\n📝 ဇာတ်ကားအကြောင်း\n\n{synopsis}"
+    return append_upload_credit(cap, max_len=max_len)
+
+
 def _mig_item_title(item):
     cap = (item.get("caption") or "").strip()
     if cap:
@@ -1697,43 +1804,62 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
         await _mig_publish_locked(context, key, items, series_key, src)
 
 
+def _mig_db_caption(title, seasons, ep=None, eps=None):
+    """Caption used for a file stored in the database channel."""
+    line = _mig_eps_line(seasons or (),
+                         eps if eps else ([ep] if ep else ()))
+    return (f"{title}\n{line}" if line else title)[:1000]
+
+
 async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
-                          photos, videos):
+                          photos, videos, seasons=None, eps=None):
     """Store photo + movie files together (one album) in DATABASE_CHANNEL_ID."""
     if not DATABASE_CHANNEL_ID:
-        return False
+        return False, None
+    seasons = sorted({int(x) for x in (seasons or [])})
+    ep_list = sorted({int(x) for x in (eps or [])})
+    if not ep_list and len(videos) > 1:
+        ep_list = list(range(1, len(videos) + 1))
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     ok = False
+    first_id = None
     try:
         media = []
         if photos:
             media.append(InputMediaPhoto(
-                photos[0]["file_id"], caption=title[:1000]))
-        for v in videos:
+                photos[0]["file_id"],
+                caption=_mig_db_caption(title, seasons, eps=ep_list)))
+        for i, v in enumerate(videos):
+            ep = ep_list[i] if i < len(ep_list) else None
             media.append(InputMediaVideo(
                 v["file_id"],
-                caption=None if media else (v.get("caption") or title)[:1000],
+                caption=None if media else _mig_db_caption(title, seasons, ep),
                 supports_streaming=True,
             ))
         if not media:
-            return False
+            return False, None
         if len(media) == 1:
             if photos:
-                await _with_flood(lambda: context.bot.send_photo(
+                sent = await _with_flood(lambda: context.bot.send_photo(
                     chat_id=db_chat, photo=photos[0]["file_id"],
-                    caption=title[:1000]))
+                    caption=_mig_db_caption(title, seasons, eps=ep_list)))
             else:
-                await _with_flood(lambda: context.bot.send_video(
+                sent = await _with_flood(lambda: context.bot.send_video(
                     chat_id=db_chat, video=videos[0]["file_id"],
-                    caption=(videos[0].get("caption") or title)[:1000],
+                    caption=_mig_db_caption(
+                        title, seasons, ep_list[0] if ep_list else None),
                     supports_streaming=True))
-            return True
+                set_file_channel_message(payload, videos[0]["file_id"],
+                                         sent.message_id)
+            return True, sent.message_id
 
         offset = 0
         for i in range(0, len(media), 10):
             chunk = media[i:i + 10]
             sent = await _with_flood(lambda: context.bot.send_media_group(
                 chat_id=db_chat, media=chunk))
+            if first_id is None and sent:
+                first_id = sent[0].message_id
             for j, msg in enumerate(sent):
                 vid_index = offset + j - (1 if photos else 0)
                 if 0 <= vid_index < len(videos):
@@ -1745,7 +1871,7 @@ async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
         logger.info("migration DB album saved: %s (%d items)", title, len(media))
     except Exception as exc:
         logger.error("migration DB save failed (%s): %s", title, exc)
-    return ok
+    return ok, first_id
 
 
 async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
@@ -1762,6 +1888,16 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
         _mig_series_photo[(src, series_key)] = photos[0]
     photo = photos[0] if photos else _mig_series_photo.get((src, series_key))
 
+    # keep the season / episode list from the source caption growing
+    new_seasons, new_eps = _mig_eps_info(items)
+    new_seasons, new_eps = _mig_eps_fill(new_seasons, new_eps, videos, sdoc)
+    known_eps = {int(x) for x in (sdoc.get("eps") or [])}
+    if not known_eps and int(sdoc.get("episodes") or 0) > 1:
+        known_eps = set(range(1, int(sdoc.get("episodes")) + 1))
+    seasons = {int(x) for x in (sdoc.get("seasons") or [])} | new_seasons
+    eps = known_eps | new_eps
+    synopsis = sdoc.get("synopsis") or _mig_synopsis(items, title)
+
     added = []
     if payload:
         known = {f.get("file_id") for f in (get_file_info(payload) or [])}
@@ -1773,12 +1909,37 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
             added.append(it)
 
     if added and payload:
-        await _mig_save_to_db(context, payload, title,
-                              [photo] if photo else [], added)
+        db_ok2, db_post_id = await _mig_save_to_db(
+            context, payload, title, [photo] if photo else [], added,
+            seasons, sorted(new_eps))
         migrated_collection.update_one(
             {"_id": f"{src}:s:{series_key}"},
-            {"$inc": {"episodes": len(added)}, "$set": {"db_saved": True}},
+            {"$inc": {"episodes": len(added)},
+             "$set": {"db_saved": True,
+                      "db_post_id": db_post_id or sdoc.get("db_post_id")}},
         )
+    # show the new season / episode numbers on the one shared series post
+    post_id = sdoc.get("post_id")
+    caption = sdoc.get("caption") or ""
+    if post_id and (new_seasons or new_eps):
+        caption = _mig_build_caption(title, synopsis, seasons, eps)
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=AUTO_PUBLISH_CHANNEL,
+                message_id=int(post_id),
+                caption=caption,
+            )
+        except Exception as exc:
+            logger.warning("series caption update failed (%s): %s", title, exc)
+    if not caption:
+        caption = _mig_build_caption(title, synopsis, seasons, eps)
+
+    migrated_collection.update_one(
+        {"_id": f"{src}:s:{series_key}"},
+        {"$set": {"seasons": sorted(seasons), "eps": sorted(eps),
+                  "synopsis": synopsis, "caption": caption}},
+    )
+
     logger.info("series episode merged: %s (+%d files, %d items)",
                 title, len(added), len(items))
     migrated_collection.update_one(
@@ -1814,36 +1975,27 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
 
     videos = [it for it in items if it["kind"] != "photo"]
     photos = [it for it in items if it["kind"] == "photo"]
+    seasons, eps = _mig_eps_info(items) if series_key else (set(), set())
+    if series_key:
+        seasons, eps = _mig_eps_fill(seasons, eps, videos)
 
     payload = generate_payload()
     for it in videos:
         save_file_info(payload, it["file_id"], it["file_name"], title)
 
     # A post with no video has nothing to deliver: never attach a deep link
-    # (it would open the bot and say "invalid link").  If the source caption
-    # carried a channel link, point the button there instead.
-    source_link = ""
-    if not videos:
-        raw = " ".join((it.get("caption") or "") for it in items)
-        m = re.search(
-            r"(?:https?://)?t\.me/(?:c/\d+/\d+|\+[\w-]+|[\w_]{4,})(?:/\d+)?",
-            raw)
-        if m:
-            source_link = m.group(0)
-            if not source_link.startswith("http"):
-                source_link = "https://" + source_link
-
+    # (it would open the bot and say "invalid link").
     if videos:
         deep_link = create_deep_linked_url(context.bot.username, payload)
         reply_markup = _mig_keyboard(deep_link)
-    elif source_link:
-        reply_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔗 ဒီလင့်ကနေ ကြည့်ရှုပါ", url=source_link)]])
     else:
         reply_markup = None
 
     header = "📝 ဇာတ်ကားအကြောင်း"
     caption = title
+    eps_line = _mig_eps_line(seasons, eps)
+    if eps_line:
+        caption += f"\n{eps_line}"
     if synopsis:
         caption += f"\n\n{header}\n\n{synopsis}"
     caption = append_upload_credit(caption, max_len=1024)
@@ -1878,7 +2030,8 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
         "migration published '%s' (%d media) -> %s id=%s",
         title, len(items), AUTO_PUBLISH_CHANNEL, sent.message_id,
     )
-    db_ok = await _mig_save_to_db(context, payload, title, photos, videos)
+    db_ok, db_post_id = await _mig_save_to_db(
+        context, payload, title, photos, videos, seasons, eps)
     migrated_collection.update_one(
         {"_id": key},
         {"$set": {
@@ -1887,6 +2040,7 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
             "post_id": sent.message_id,
             "payload": payload,
             "db_saved": bool(db_ok),
+            "db_post_id": db_post_id,
             "published_at": time.time(),
         }},
         upsert=True,
@@ -1905,6 +2059,11 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
                 "payload": payload,
                 "db_saved": bool(db_ok),
                 "episodes": len(videos),
+                "seasons": sorted(seasons),
+                "eps": sorted(eps),
+                "synopsis": synopsis,
+                "caption": caption,
+                "db_post_id": db_post_id,
                 "published_at": time.time(),
             }},
             upsert=True,
@@ -1919,7 +2078,8 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     src = _mig_source_id(message)
-    if src is None or src not in SOURCE_CHANNEL_IDS:
+    if src is None or (src not in SOURCE_CHANNEL_IDS
+                       and src not in _mig_extra_sources()):
         return
     if message.chat_id == AUTO_PUBLISH_CHANNEL:
         return
@@ -2374,6 +2534,155 @@ async def fixempty_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id, f"✅ ပြီးပါပြီ\nbutton ဖျက်ပြီး: {fixed}\nfailed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
+
+
+def _mig_insert_eps_line(caption, line):
+    """Put the '📺 Season …' line right under the title of an existing caption."""
+    lines = [ln for ln in (caption or "").split("\n")
+             if not ln.strip().startswith("📺")]
+    if not lines:
+        return caption
+    lines.insert(1, line)
+    text = "\n".join(lines)
+    return text if len(text) <= 1024 else text[:1024]
+
+
+async def epfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a '📺 Season … · Episode …' line to series posts that lack one."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not AUTO_PUBLISH_CHANNEL:
+        await update.message.reply_text("⚠️ target channel not set.")
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "📺 Season/Episode မပါတဲ့ series post တွေ ဖြည့်နေတယ်...")
+
+    async def worker():
+        fixed = skipped = failed = 0
+        for d in migrated_collection.find({"series_key": {"$exists": True},
+                                           "post_id": {"$exists": True}}):
+            if d.get("eps"):
+                continue
+            n = int(d.get("episodes") or 0)
+            cap = d.get("caption") or ""
+            if n < 2 or not cap:
+                skipped += 1
+                continue
+            seasons = sorted({int(x) for x in (d.get("seasons") or [])}) or [1]
+            eps = list(range(1, n + 1))
+            new_cap = _mig_insert_eps_line(cap, _mig_eps_line(seasons, eps))
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=AUTO_PUBLISH_CHANNEL,
+                    message_id=int(d["post_id"]),
+                    caption=new_cap,
+                )
+                migrated_collection.update_one(
+                    {"_id": d["_id"]},
+                    {"$set": {"seasons": seasons, "eps": eps,
+                              "caption": new_cap}})
+                fixed += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.8)
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ ပြီးပါပြီ\nဖြည့်ပြီး: {fixed}\nကျော်: {skipped}\nfailed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
+
+
+async def _mig_read_caption(bot, chat_id, message_id, admin_chat):
+    """Read a channel message caption by forwarding a temp copy to the admin."""
+    try:
+        fwd = await bot.forward_message(chat_id=admin_chat,
+                                        from_chat_id=chat_id,
+                                        message_id=int(message_id))
+    except Exception:
+        return None
+    cap = fwd.caption or ""
+    try:
+        await bot.delete_message(chat_id=admin_chat, message_id=fwd.message_id)
+    except Exception:
+        pass
+    return cap
+
+
+async def dbeps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Put '📺 Season … · Episode …' captions on files already in the DB channel."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not DATABASE_CHANNEL_ID:
+        await update.message.reply_text("⚠️ DATABASE_CHANNEL_ID not set.")
+        return
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    admin = update.effective_chat.id
+    await update.message.reply_text(
+        "🗄 DB channel ဖိုင်တွေမှာ Season/Episode ဖြည့်နေတယ်...")
+
+    async def worker():
+        fixed = skipped = failed = 0
+        for d in migrated_collection.find({"series_key": {"$exists": True},
+                                           "payload": {"$exists": True}}):
+            payload = d.get("payload")
+            files = get_file_info(payload) if payload else []
+            ids = [int(f["channel_message_id"]) for f in files
+                   if f.get("channel_message_id")]
+            if not ids:
+                skipped += 1
+                continue
+            seasons = sorted({int(x) for x in (d.get("seasons") or [])})
+            eps = sorted({int(x) for x in (d.get("eps") or [])})
+            if not eps and int(d.get("episodes") or 0) > 1:
+                eps = list(range(1, int(d.get("episodes")) + 1))
+            if not eps:
+                skipped += 1
+                continue
+            if not seasons:
+                seasons = [1]
+            title = (d.get("title") or "").strip()
+            new_cap = _mig_db_caption(title, seasons, eps=eps)
+            cand = []
+            if d.get("db_post_id"):
+                cand.append(int(d["db_post_id"]))
+            cand.append(min(ids))
+            cand.append(min(ids) - 1)
+            target = None
+            for mid in dict.fromkeys(cand):
+                cap = await _mig_read_caption(context.bot, db_chat, mid, admin)
+                if cap is None:
+                    continue
+                low = cap.lower()
+                if not title or title[:16].lower() in low:
+                    target = mid
+                    break
+            if target is None:
+                skipped += 1
+                continue
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=db_chat, message_id=target, caption=new_cap)
+                migrated_collection.update_one(
+                    {"_id": d["_id"]},
+                    {"$set": {"db_post_id": target, "seasons": seasons,
+                              "eps": eps}})
+                fixed += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.8)
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ ပြီးပါပြီ\nDB caption ဖြည့်ပြီး: {fixed}\n"
+                f"ကျော်: {skipped}\nfailed: {failed}")
         except Exception:
             pass
 
@@ -3302,6 +3611,8 @@ def build_application(token):
     application.add_handler(CommandHandler("migstat", migstat_command))
     application.add_handler(CommandHandler("linkcheck", linkcheck_command))
     application.add_handler(CommandHandler("fixempty", fixempty_command))
+    application.add_handler(CommandHandler("epfix", epfix_command))
+    application.add_handler(CommandHandler("dbeps", dbeps_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)

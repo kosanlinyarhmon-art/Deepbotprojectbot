@@ -11,6 +11,7 @@ the run always continues from the last forwarded message.
 import asyncio
 import logging
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -19,6 +20,7 @@ from pymongo import MongoClient
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.types import MessageService
 
 logger = logging.getLogger(__name__)
@@ -26,17 +28,16 @@ logger = logging.getLogger(__name__)
 API_ID = 31778137
 API_HASH = "357247ed45b28459c6600e31cce5b773"
 TARGET_BOT = "@UwinzawnyuntBot"
+DEFAULT_HUBS = ["-1002531024735"]
+_LINK = re.compile(
+    r"(?:https?://)?t\.me/(?:c/(\d+)/(\d+)|(\+[A-Za-z0-9_-]+)"
+    r"|([A-Za-z][\w_]{3,})(?:/(\d+))?)")
 DEFAULT_SOURCES = [
     "-1002384798185",
     "-1002463885600",
     "-1002190088840",
     "-1002480433985",
     "-1002477764635",
-    "-1003928332092",
-    "-1002776075605",
-    "-1002263641762",
-    "-1001778227594",
-    "-1001624185250",
 ]
 
 _client = None
@@ -194,6 +195,138 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay):
         notify(f"✅ ပြီးသွားပြီ: {title} ({sent} msg)")
 
 
+async def forward_hub(client, bot, raw_hub, per_item, min_delay):
+    """Link-hub channel: join the channels it links to, forward the movies the
+    links point at, then leave again (only channels we joined ourselves)."""
+    hub_id = to_entity_id(raw_hub)
+    try:
+        hub = await client.get_entity(hub_id)
+    except Exception as exc:
+        log(f"SKIP hub {raw_hub}: cannot resolve ({exc})")
+        return
+    title = getattr(hub, "title", str(hub_id))
+    key = str(hub_id)
+    st = state_col().find_one({"_id": key}) or {"_id": key, "last_id": 0}
+    last_id = int(st.get("last_id") or 0)
+    if st.get("done"):
+        log(f"== SKIP hub {title} (already finished)")
+        return
+    log(f"== START hub {title} ({hub_id}) from id > {last_id}")
+    notify(f"🚚 Hub စတင်ပါပြီ: {title}")
+
+    seen = _db()["hub_seen"]
+    joined = set()
+    sent = 0
+    last_note = time.time()
+
+    async def flush(msgs):
+        nonlocal sent, last_note
+        by_chat = {}
+        for m in msgs:
+            by_chat.setdefault(m.chat_id, []).append(m)
+        for ch, group in by_chat.items():
+            ids = [m.id for m in group]
+            try:
+                await client.forward_messages(bot, ids, from_peer=ch)
+                for m in group:
+                    seen.update_one({"_id": f"{ch}:{m.id}"},
+                                    {"$set": {"ts": time.time()}},
+                                    upsert=True)
+                sent += len(ids)
+                log(f"   hub forwarded {len(ids)} from {ch}")
+                if time.time() - last_note > 900:
+                    last_note = time.time()
+                    notify(f"🚚 {title}\n{sent} msg တင်ပြီး ဆက်လုပ်နေတယ်")
+            except FloodWaitError as exc:
+                await asyncio.sleep(exc.seconds + 5)
+            except Exception as exc:
+                log(f"   hub forward failed {ch} {ids}: {exc}")
+            await asyncio.sleep(max(min_delay, per_item * len(ids) / 2))
+
+    async for msg in client.iter_messages(hub, min_id=last_id, reverse=True):
+        if _stop:
+            break
+        text = msg.message or ""
+        targets = []
+        invites = []
+        for cid, mid, inv, uname, umid in _LINK.findall(text):
+            if cid and mid:
+                targets.append((int("-100" + cid), int(mid)))
+            elif uname and umid:
+                targets.append((uname, int(umid)))
+            elif inv:
+                invites.append(inv)
+        if not targets and not invites:
+            state_col().update_one({"_id": key},
+                                   {"$set": {"last_id": msg.id}},
+                                   upsert=True)
+            continue
+
+        # join the channels this post points at (they are usually private)
+        for inv in invites:
+            link = inv if inv.startswith("+") else "+" + inv
+            try:
+                ch = await client.get_entity(link)
+                _add_extra_source(ch.id)
+                if getattr(ch, "left", True):
+                    await client(JoinChannelRequest(link))
+                    joined.add(ch.id)
+                    await asyncio.sleep(2)
+                    log(f"   joined {getattr(ch, 'title', ch.id)}")
+            except Exception as exc:
+                log(f"   join {link} failed: {type(exc).__name__}")
+
+        batch = []
+        for ref, mid in targets:
+            if isinstance(ref, int):
+                _add_extra_source(ref)
+            if seen.find_one({"_id": f"{ref}:{mid}"}):
+                continue
+            try:
+                m = await client.get_messages(ref, ids=mid)
+            except Exception:
+                m = None
+            if not m or not getattr(m, "media", None):
+                continue
+            batch.append(m)
+        if batch:
+            await flush(batch)
+
+        state_col().update_one({"_id": key},
+                               {"$set": {"last_id": msg.id, "title": title}},
+                               upsert=True)
+
+        # leave the channels we joined for this post
+        for ch_id in list(joined):
+            try:
+                await client(LeaveChannelRequest(ch_id))
+                log(f"   left {ch_id}")
+            except Exception:
+                pass
+            joined.discard(ch_id)
+
+    if not _stop:
+        state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
+        log(f"== DONE hub {title} ({sent} msgs)")
+        notify(f"✅ Hub ပြီးသွားပြီ: {title} ({sent} msg)")
+
+
+_EXTRA_ADDED = set()
+
+
+def _add_extra_source(channel_id):
+    cid = int(channel_id)
+    if cid in _EXTRA_ADDED:
+        return
+    _EXTRA_ADDED.add(cid)
+    try:
+        _db()["config"].update_one(
+            {"_id": "migration"},
+            {"$addToSet": {"extra_sources": cid}}, upsert=True)
+    except Exception:
+        pass
+
+
 async def _run():
     global _stop, _client
     cfg = config()
@@ -221,6 +354,13 @@ async def _run():
         await asyncio.sleep(2)
     except Exception as exc:
         log(f"warning: /start failed: {exc}")
+
+    # link hubs first: they are short and unlock the newest series quickly
+    hubs = cfg.get("hubs") or DEFAULT_HUBS
+    for hub in hubs:
+        if _stop:
+            break
+        await forward_hub(client, bot, hub, per_item, min_delay)
 
     for src in sources:
         if _stop:
