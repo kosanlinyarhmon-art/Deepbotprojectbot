@@ -2859,12 +2859,22 @@ def _mig_group_posts(docs):
     return [g["docs"] for g in groups]
 
 
+_SERIESMERGE_LOCK = asyncio.Lock()
+
+
 async def _seriesmerge(bot, dry=False):
     """Merge published per-episode posts of one series into ONE post.
 
     Also repairs junk titles ("Ep 1+2", "Gen V Trojan 2") by reading the movie
     file name stored in the post payload.
     """
+    if _SERIESMERGE_LOCK.locked():
+        return [], 0, 0, 0, 0
+    async with _SERIESMERGE_LOCK:
+        return await _seriesmerge_locked(bot, dry)
+
+
+async def _seriesmerge_locked(bot, dry=False):
     docs = list(migrated_collection.find({
         "post_id": {"$exists": True},
         "merged_into": {"$exists": False},
@@ -2998,9 +3008,26 @@ async def _epsfix_once(bot, admin_chat):
         logger.warning("epsfix once failed: %s", exc)
 
 
+async def _seriesmerge_loop(bot):
+    """Keep merging while the cloud forwarder is still filling the channel."""
+    await asyncio.sleep(420)
+    while True:
+        try:
+            cfg = db["config"].find_one({"_id": "forwarder"}) or {}
+            if cfg.get("enabled"):
+                g, m, d, f, r = await _seriesmerge(bot)
+                if m or d or r:
+                    logger.info("seriesmerge loop: groups=%d merged=%d "
+                                "deleted=%d renamed=%d", len(g), m, d, r)
+        except Exception as exc:
+            logger.warning("seriesmerge loop failed: %s", exc)
+        await asyncio.sleep(600)
+
+
 async def _epsfix_post_init(application):
     """Run the one-time repair after a deploy."""
     try:
+        application.create_task(_seriesmerge_loop(application.bot))
         if db["config"].find_one({"_id": "backfill2_once"}):
             return
         db["config"].update_one({"_id": "backfill2_once"},
