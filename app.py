@@ -2984,7 +2984,8 @@ async def _seriesmerge_locked(bot, dry=False):
             {"_id": keep["_id"]},
             {"$set": {"title": title, "caption": caption,
                       "seasons": sorted(seasons), "eps": sorted(eps),
-                      "episodes": max(total, len(items)),
+                      "episodes": max(total,
+                                      len(get_file_info(payload) or [])),
                       "payload": payload, "series_fixed": True}})
         await asyncio.sleep(1.2)
     return groups, merged, deleted, failed, renamed
