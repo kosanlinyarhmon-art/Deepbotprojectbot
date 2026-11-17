@@ -1911,6 +1911,94 @@ async def dbinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Sources: {sorted(SOURCE_CHANNEL_IDS)}")
 
 
+async def dbrepair_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Make sure every migration post has its movie file in DATABASE_CHANNEL_ID.
+
+    - saves payload files that were never copied
+    - a photo-only post borrows the files of the sibling post with the same title
+    """
+    if not is_admin(update.effective_user.id):
+        return
+    if not DATABASE_CHANNEL_ID:
+        await update.message.reply_text("⚠️ DATABASE_CHANNEL_ID not set.")
+        return
+    chat_id = update.effective_chat.id
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    docs = list(migrated_collection.find({"post_id": {"$exists": True}}))
+    with_files = [d for d in docs if d.get("payload")
+                  and get_file_info(d["payload"])]
+    await update.message.reply_text(
+        f"🗄️ Repair start: {len(docs)} posts, {len(with_files)} with files")
+
+    async def save_file(payload, f):
+        cap = (f.get("file_caption") or "")[:1000]
+        try:
+            try:
+                sent_db = await _with_flood(lambda: context.bot.send_video(
+                    chat_id=db_chat, video=f["file_id"], caption=cap,
+                    supports_streaming=True))
+            except TelegramError:
+                sent_db = await _with_flood(lambda: context.bot.send_document(
+                    chat_id=db_chat, document=f["file_id"],
+                    filename=f.get("file_name") or "movie.mp4", caption=cap))
+            set_file_channel_message(payload, f["file_id"], sent_db.message_id)
+            return sent_db.message_id
+        except Exception as exc:
+            logger.warning("dbrepair send failed: %s", exc)
+            return None
+
+    async def worker():
+        added = borrowed = failed = 0
+        for n, d in enumerate(docs, 1):
+            payload = d.get("payload")
+            files = get_file_info(payload) if payload else []
+            if not files:
+                tt = _mig_tokens(d.get("title") or "")
+                if not tt:
+                    continue
+                donor = None
+                for s in with_files:
+                    st = _mig_tokens(s.get("title") or "")
+                    if st and len(tt & st) / len(tt) >= 0.6:
+                        donor = s
+                        break
+                if not donor or not payload:
+                    continue
+                for f in get_file_info(donor["payload"]):
+                    mid = f.get("channel_message_id")
+                    if not mid:
+                        mid = await save_file(donor["payload"], f)
+                    if mid:
+                        save_file_info(payload, f["file_id"], f["file_name"],
+                                       f.get("file_caption"))
+                        set_file_channel_message(payload, f["file_id"], mid)
+                        borrowed += 1
+                continue
+            for f in files:
+                if f.get("channel_message_id"):
+                    continue
+                if await save_file(payload, f):
+                    added += 1
+                else:
+                    failed += 1
+                await asyncio.sleep(1.2)
+            if n % 25 == 0:
+                try:
+                    await context.bot.send_message(
+                        chat_id, f"🗄️ {n}/{len(docs)} ...")
+                except Exception:
+                    pass
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Repair done\nadded: {added}\nborrowed: {borrowed}\n"
+                f"failed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
+
+
 async def dbcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Report which migration posts are missing their movie file in the DB channel."""
     if not is_admin(update.effective_user.id):
@@ -2651,6 +2739,7 @@ def build_application(token):
     application.add_handler(CommandHandler("dbsave", dbsave_command))
     application.add_handler(CommandHandler("dbfix", dbfix_command))
     application.add_handler(CommandHandler("dbcheck", dbcheck_command))
+    application.add_handler(CommandHandler("dbrepair", dbrepair_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
