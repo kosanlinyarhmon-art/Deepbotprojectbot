@@ -1387,17 +1387,20 @@ _MIG_JUNK = (
     re.compile(r"myint\s*myat\s*thu", re.I),
     re.compile(r"credit", re.I),
     re.compile(r"upload(?:ed)?\s*by", re.I),
+    re.compile(r"\bjoin\b", re.I),
 )
 _MIG_URL = re.compile(
     r"(?:https?://|www\.|t\.me/|telegram\.me/|telegram\.dog/|tg://)\S*", re.I)
+_MIG_SYMBOLS = re.compile(r"^[\W_]+$", re.UNICODE)
 
 _mig_albums = {}
+_MIG_PUBLISH_LOCK = asyncio.Lock()
 MIG_QUIET_PERIOD = 2.5
 MIG_MAX_WAIT = 20.0
 
 
 def clean_migrate_caption(text):
-    """Drop credit / watermark / link lines from a caption, keep the rest."""
+    """Drop credit / watermark / link / join-prompt lines, keep the rest."""
     if not text:
         return ""
     keep = []
@@ -1408,6 +1411,10 @@ def clean_migrate_caption(text):
         if not stripped:
             if keep and keep[-1] != "":
                 keep.append("")
+            continue
+        if _MIG_SYMBOLS.match(stripped):
+            continue
+        if stripped.endswith(("👇", "🔰", "👇🔰")):
             continue
         keep.append(stripped)
     out = "\n".join(keep)
@@ -1537,6 +1544,11 @@ async def _mig_flush_later(context: ContextTypes.DEFAULT_TYPE, key: str):
 async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items):
     if not AUTO_PUBLISH_CHANNEL or not items:
         return
+    async with _MIG_PUBLISH_LOCK:
+        await _mig_publish_locked(context, key, items)
+
+
+async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str, items):
 
     title = _mig_title(items) or "🎬 ဇာတ်ကားအသစ်"
     title = clean_migrate_caption(title)[:200].strip() or "🎬 ဇာတ်ကားအသစ်"
