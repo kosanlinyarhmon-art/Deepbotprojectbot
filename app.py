@@ -2183,6 +2183,128 @@ async def dbrepair_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(worker())
 
 
+def _mig_title_series_key(title):
+    """Series key from a stored post title (used by /seriesfix)."""
+    base = _mig_series_base(title or "")
+    if not base:
+        return ""
+    if not _MIG_QUALITY.sub("", base).strip():
+        return ""
+    key = re.sub(r"[^0-9a-z\u1000-\u109f]+", "", base.lower())
+    if len(key) < 4 or key.isdigit():
+        return ""
+    if not re.search(r"[a-z\u1000-\u109f]", key):
+        return ""
+    return key
+
+
+async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Consolidate per-episode series posts into ONE post with ONE deep link.
+
+    Keeps the earliest post of each series, copies every other episode's files
+    into its payload, then deletes the extra posts.
+    Usage: /seriesfix dry   (preview only)   |   /seriesfix
+    """
+    if not is_admin(update.effective_user.id):
+        return
+    if not AUTO_PUBLISH_CHANNEL:
+        await update.message.reply_text("⚠️ target channel not set.")
+        return
+    dry = any(a.lower() == "dry" for a in (context.args or []))
+    chat_id = update.effective_chat.id
+
+    docs = list(migrated_collection.find({
+        "post_id": {"$exists": True},
+        "merged_into": {"$exists": False},
+        "series_fixed": {"$ne": True},
+    }))
+    groups = {}
+    for d in docs:
+        title = d.get("title") or ""
+        if not _MIG_EP_MARK.search(title):
+            continue
+        k = _mig_title_series_key(title)
+        if not k:
+            continue
+        groups.setdefault(k, []).append(d)
+    groups = {k: v for k, v in groups.items() if len(v) > 1}
+
+    if dry:
+        lines = [f"🧩 Series groups: {len(groups)}"]
+        for k, items in list(groups.items())[:25]:
+            items.sort(key=lambda d: int(d.get("post_id") or 0))
+            ids = ",".join(str(d["post_id"]) for d in items)
+            lines.append(f"{items[0].get('title')} -> keep {items[0]['post_id']} "
+                         f"({len(items)}): {ids}")
+        await update.message.reply_text("\n".join(lines)[:3900])
+        return
+
+    await update.message.reply_text(
+        f"🧩 Series fix start: {len(groups)} series, "
+        f"{sum(len(v) for v in groups.values())} posts")
+
+    async def worker():
+        merged = deleted = failed = 0
+        for k, items in groups.items():
+            items.sort(key=lambda d: int(d.get("post_id") or 0))
+            keep = items[0]
+            keep_id = int(keep["post_id"])
+            payload = keep.get("payload")
+            if not payload:
+                payload = generate_payload()
+                try:
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=AUTO_PUBLISH_CHANNEL,
+                        message_id=keep_id,
+                        reply_markup=_mig_keyboard(
+                            create_deep_linked_url(context.bot.username,
+                                                   payload)),
+                    )
+                except Exception as exc:
+                    logger.warning("seriesfix markup failed %s: %s", keep_id, exc)
+                migrated_collection.update_one(
+                    {"_id": keep["_id"]}, {"$set": {"payload": payload}})
+            base_title = (_mig_series_base(keep.get("title") or "")
+                          or keep.get("title") or "")
+            for d in items[1:]:
+                pid = int(d["post_id"])
+                donor = d.get("payload")
+                if donor:
+                    for f in get_file_info(donor) or []:
+                        save_file_info(payload, f["file_id"], f["file_name"],
+                                       f.get("file_caption"))
+                        if f.get("channel_message_id"):
+                            set_file_channel_message(
+                                payload, f["file_id"],
+                                f["channel_message_id"])
+                try:
+                    await context.bot.delete_message(AUTO_PUBLISH_CHANNEL, pid)
+                    deleted += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.warning("seriesfix delete failed %s: %s", pid, exc)
+                    continue
+                migrated_collection.update_one(
+                    {"_id": d["_id"]},
+                    {"$set": {"merged_into": f"post:{keep_id}"}})
+                merged += 1
+                await asyncio.sleep(1.2)
+            migrated_collection.update_one(
+                {"_id": keep["_id"]},
+                {"$set": {"title": base_title, "series_fixed": True,
+                          "episodes": len(items), "db_saved": True}})
+            await asyncio.sleep(1.5)
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Series fix done\nmerged: {merged}\ndeleted: {deleted}\n"
+                f"failed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
+
+
 async def dbcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Report which migration posts are missing their movie file in the DB channel."""
     if not is_admin(update.effective_user.id):
@@ -2924,6 +3046,7 @@ def build_application(token):
     application.add_handler(CommandHandler("dbfix", dbfix_command))
     application.add_handler(CommandHandler("dbcheck", dbcheck_command))
     application.add_handler(CommandHandler("dbrepair", dbrepair_command))
+    application.add_handler(CommandHandler("seriesfix", seriesfix_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
