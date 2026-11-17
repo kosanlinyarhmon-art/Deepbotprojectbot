@@ -2293,6 +2293,16 @@ async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"_id": keep["_id"]},
                 {"$set": {"title": base_title, "series_fixed": True,
                           "episodes": len(items), "db_saved": True}})
+            src = keep.get("source")
+            if src:
+                migrated_collection.update_one(
+                    {"_id": f"{src}:s:{k}"},
+                    {"$set": {"done": True, "source": src, "series_key": k,
+                              "title": base_title, "post_id": keep_id,
+                              "payload": payload, "db_saved": True,
+                              "episodes": len(items),
+                              "published_at": time.time()}},
+                    upsert=True)
             await asyncio.sleep(1.5)
         try:
             await context.bot.send_message(
