@@ -2060,10 +2060,19 @@ async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
                 photos[0]["file_id"],
                 caption=_mig_db_caption(title, seasons, eps=ep_list)))
         for i, v in enumerate(videos):
-            ep = ep_list[i] if i < len(ep_list) else None
+            # Prefer the episode number written in this file's own name/caption
+            # (a series often has 720p + 1080p of the same episode).
+            v_seasons, v_eps = _mig_eps_info([{
+                "caption": v.get("caption") or v.get("file_caption") or "",
+                "file_name": v.get("file_name") or "",
+            }])
+            ep = (min(v_eps) if v_eps
+                  else ep_list[i] if i < len(ep_list) else None)
+            v_seasons = v_seasons or set(seasons)
             media.append(InputMediaVideo(
                 v["file_id"],
-                caption=None if media else _mig_db_caption(title, seasons, ep),
+                caption=None if media else _mig_db_caption(
+                    title, v_seasons, eps=[ep] if ep else []),
                 supports_streaming=True,
             ))
         if not media:
