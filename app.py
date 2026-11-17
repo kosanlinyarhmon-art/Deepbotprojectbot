@@ -2551,6 +2551,42 @@ def _mig_insert_eps_line(caption, line):
     return text if len(text) <= 1024 else text[:1024]
 
 
+async def _epsfix_posts(bot, admin_chat):
+    """Add a '📺 Season … · Episode …' line to published series posts."""
+    fixed = skipped = failed = 0
+    for d in migrated_collection.find({"series_key": {"$exists": True},
+                                       "post_id": {"$exists": True}}):
+        if d.get("eps"):
+            continue
+        n = int(d.get("episodes") or 0)
+        if n < 2:
+            skipped += 1
+            continue
+        seasons = sorted({int(x) for x in (d.get("seasons") or [])}) or [1]
+        eps = list(range(1, n + 1))
+        cap = d.get("caption") or await _mig_read_caption(
+            bot, AUTO_PUBLISH_CHANNEL, d["post_id"], admin_chat)
+        if not cap:
+            skipped += 1
+            continue
+        new_cap = _mig_insert_eps_line(cap, _mig_eps_line(seasons, eps))
+        try:
+            await bot.edit_message_caption(
+                chat_id=AUTO_PUBLISH_CHANNEL,
+                message_id=int(d["post_id"]),
+                caption=new_cap,
+            )
+            migrated_collection.update_one(
+                {"_id": d["_id"]},
+                {"$set": {"seasons": seasons, "eps": eps,
+                          "caption": new_cap}})
+            fixed += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.8)
+    return fixed, skipped, failed
+
+
 async def epfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add a '📺 Season … · Episode …' line to series posts that lack one."""
     if not is_admin(update.effective_user.id):
@@ -2563,33 +2599,7 @@ async def epfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📺 Season/Episode မပါတဲ့ series post တွေ ဖြည့်နေတယ်...")
 
     async def worker():
-        fixed = skipped = failed = 0
-        for d in migrated_collection.find({"series_key": {"$exists": True},
-                                           "post_id": {"$exists": True}}):
-            if d.get("eps"):
-                continue
-            n = int(d.get("episodes") or 0)
-            cap = d.get("caption") or ""
-            if n < 2 or not cap:
-                skipped += 1
-                continue
-            seasons = sorted({int(x) for x in (d.get("seasons") or [])}) or [1]
-            eps = list(range(1, n + 1))
-            new_cap = _mig_insert_eps_line(cap, _mig_eps_line(seasons, eps))
-            try:
-                await context.bot.edit_message_caption(
-                    chat_id=AUTO_PUBLISH_CHANNEL,
-                    message_id=int(d["post_id"]),
-                    caption=new_cap,
-                )
-                migrated_collection.update_one(
-                    {"_id": d["_id"]},
-                    {"$set": {"seasons": seasons, "eps": eps,
-                              "caption": new_cap}})
-                fixed += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.8)
+        fixed, skipped, failed = await _epsfix_posts(context.bot, chat_id)
         try:
             await context.bot.send_message(
                 chat_id,
@@ -2616,6 +2626,62 @@ async def _mig_read_caption(bot, chat_id, message_id, admin_chat):
     return cap
 
 
+async def _epsfix_db(bot, admin_chat):
+    """Put '📺 Season … · Episode …' captions on files already in the DB channel."""
+    if not DATABASE_CHANNEL_ID:
+        return 0, 0, 0
+    db_chat = int(DATABASE_CHANNEL_ID.strip())
+    fixed = skipped = failed = 0
+    for d in migrated_collection.find({"series_key": {"$exists": True},
+                                       "payload": {"$exists": True}}):
+        payload = d.get("payload")
+        files = get_file_info(payload) if payload else []
+        ids = [int(f["channel_message_id"]) for f in files
+               if f.get("channel_message_id")]
+        if not ids:
+            skipped += 1
+            continue
+        seasons = sorted({int(x) for x in (d.get("seasons") or [])})
+        eps = sorted({int(x) for x in (d.get("eps") or [])})
+        if not eps and int(d.get("episodes") or 0) > 1:
+            eps = list(range(1, int(d.get("episodes")) + 1))
+        if not eps:
+            skipped += 1
+            continue
+        if not seasons:
+            seasons = [1]
+        title = (d.get("title") or "").strip()
+        new_cap = _mig_db_caption(title, seasons, eps=eps)
+        cand = []
+        if d.get("db_post_id"):
+            cand.append(int(d["db_post_id"]))
+        cand.append(min(ids))
+        cand.append(min(ids) - 1)
+        target = None
+        for mid in dict.fromkeys(cand):
+            cap = await _mig_read_caption(bot, db_chat, mid, admin_chat)
+            if cap is None:
+                continue
+            if not title or title[:16].lower() in cap.lower():
+                target = mid
+                break
+        if target is None:
+            skipped += 1
+            continue
+        try:
+            await bot.edit_message_caption(
+                chat_id=db_chat, message_id=target, caption=new_cap)
+            migrated_collection.update_one(
+                {"_id": d["_id"]},
+                {"$set": {"db_post_id": target, "seasons": seasons,
+                          "eps": eps}})
+            fixed += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.8)
+    return fixed, skipped, failed
+
+
 async def dbeps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Put '📺 Season … · Episode …' captions on files already in the DB channel."""
     if not is_admin(update.effective_user.id):
@@ -2623,61 +2689,12 @@ async def dbeps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not DATABASE_CHANNEL_ID:
         await update.message.reply_text("⚠️ DATABASE_CHANNEL_ID not set.")
         return
-    db_chat = int(DATABASE_CHANNEL_ID.strip())
-    admin = update.effective_chat.id
+    chat_id = update.effective_chat.id
     await update.message.reply_text(
         "🗄 DB channel ဖိုင်တွေမှာ Season/Episode ဖြည့်နေတယ်...")
 
     async def worker():
-        fixed = skipped = failed = 0
-        for d in migrated_collection.find({"series_key": {"$exists": True},
-                                           "payload": {"$exists": True}}):
-            payload = d.get("payload")
-            files = get_file_info(payload) if payload else []
-            ids = [int(f["channel_message_id"]) for f in files
-                   if f.get("channel_message_id")]
-            if not ids:
-                skipped += 1
-                continue
-            seasons = sorted({int(x) for x in (d.get("seasons") or [])})
-            eps = sorted({int(x) for x in (d.get("eps") or [])})
-            if not eps and int(d.get("episodes") or 0) > 1:
-                eps = list(range(1, int(d.get("episodes")) + 1))
-            if not eps:
-                skipped += 1
-                continue
-            if not seasons:
-                seasons = [1]
-            title = (d.get("title") or "").strip()
-            new_cap = _mig_db_caption(title, seasons, eps=eps)
-            cand = []
-            if d.get("db_post_id"):
-                cand.append(int(d["db_post_id"]))
-            cand.append(min(ids))
-            cand.append(min(ids) - 1)
-            target = None
-            for mid in dict.fromkeys(cand):
-                cap = await _mig_read_caption(context.bot, db_chat, mid, admin)
-                if cap is None:
-                    continue
-                low = cap.lower()
-                if not title or title[:16].lower() in low:
-                    target = mid
-                    break
-            if target is None:
-                skipped += 1
-                continue
-            try:
-                await context.bot.edit_message_caption(
-                    chat_id=db_chat, message_id=target, caption=new_cap)
-                migrated_collection.update_one(
-                    {"_id": d["_id"]},
-                    {"$set": {"db_post_id": target, "seasons": seasons,
-                              "eps": eps}})
-                fixed += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.8)
+        fixed, skipped, failed = await _epsfix_db(context.bot, chat_id)
         try:
             await context.bot.send_message(
                 chat_id,
@@ -2687,6 +2704,35 @@ async def dbeps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     context.application.create_task(worker())
+
+
+async def _epsfix_once(bot, admin_chat):
+    """One-time backfill: Season/Episode on old posts and DB-channel files."""
+    await asyncio.sleep(90)
+    try:
+        p = await _epsfix_posts(bot, admin_chat)
+        d = await _epsfix_db(bot, admin_chat)
+        await bot.send_message(
+            admin_chat,
+            f"📺 Season/Episode ဖြည့်ပြီး\n"
+            f"post: {p[0]} (ကျော် {p[1]}, fail {p[2]})\n"
+            f"DB: {d[0]} (ကျော် {d[1]}, fail {d[2]})")
+    except Exception as exc:
+        logger.warning("epsfix once failed: %s", exc)
+
+
+async def _epsfix_post_init(application):
+    """Run the Season/Episode backfill once, right after a deploy."""
+    try:
+        if db["config"].find_one({"_id": "epsfix_once"}):
+            return
+        db["config"].update_one({"_id": "epsfix_once"},
+                                {"$set": {"ts": time.time()}}, upsert=True)
+        cfg = db["config"].find_one({"_id": "forwarder"}) or {}
+        admin = int(cfg.get("admin_chat") or 1147922719)
+        application.create_task(_epsfix_once(application.bot, admin))
+    except Exception as exc:
+        logger.warning("epsfix post_init failed: %s", exc)
 
 
 async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3567,7 +3613,8 @@ def build_application(token):
     Handlers are (re)built per token so the bot can swap to a spare token at
     runtime without restarting the process.
     """
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).post_init(
+        _epsfix_post_init).build()
 
     newpost_handler = ConversationHandler(
         entry_points=[CommandHandler('newpost', newpost_start)],

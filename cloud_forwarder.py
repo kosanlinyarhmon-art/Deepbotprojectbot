@@ -264,7 +264,7 @@ async def forward_hub(client, bot, raw_hub, per_item, min_delay):
 
         # join the channels this post points at (they are usually private)
         for inv in invites:
-            link = inv if inv.startswith("+") else "+" + inv
+            link = "https://t.me/" + (inv if inv.startswith("+") else "+" + inv)
             try:
                 ch = await client.get_entity(link)
                 _add_extra_source(ch.id)
