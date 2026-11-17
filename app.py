@@ -3010,15 +3010,18 @@ async def _epsfix_once(bot, admin_chat):
 
 async def _seriesmerge_loop(bot):
     """Keep merging while the cloud forwarder is still filling the channel."""
-    await asyncio.sleep(420)
+    await asyncio.sleep(300)
+    was = False
     while True:
         try:
             cfg = db["config"].find_one({"_id": "forwarder"}) or {}
-            if cfg.get("enabled"):
+            on = bool(cfg.get("enabled"))
+            if on or was:
                 g, m, d, f, r = await _seriesmerge(bot)
                 if m or d or r:
                     logger.info("seriesmerge loop: groups=%d merged=%d "
                                 "deleted=%d renamed=%d", len(g), m, d, r)
+            was = on
         except Exception as exc:
             logger.warning("seriesmerge loop failed: %s", exc)
         await asyncio.sleep(600)
