@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, InvalidToken
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler, ApplicationHandlerStop
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
 from telegraph import Telegraph
@@ -224,6 +224,34 @@ logger.info(
     DATABASE_CHANNEL_ID,
     sorted(BLOCKED_CHANNEL_IDS),
 )
+
+# ---------- Source-channel migration ----------
+# userbot က အခြား channel တွေက post တွေကို ဒီ bot ဆီ forward လုပ်ပါတယ်။
+# bot က အဲ့ဒါတွေကို ပုံ + ဇာတ်ညွှန်း + deeplink button ပုံစံနဲ့
+# AUTO_PUBLISH_CHANNEL မှာ post အသစ် ပြန်တင်ပါတယ်။
+SOURCE_CHANNEL_IDS = {
+    int(x.strip())
+    for x in os.environ.get(
+        "SOURCE_CHANNEL_IDS",
+        "-1002384798185,-1002463885600,-1002190088840,-1002480433985",
+    ).split(",")
+    if x.strip()
+}
+try:
+    AUTO_PUBLISH_CHANNEL = int(
+        os.environ.get("AUTO_PUBLISH_CHANNEL", "-1003753299714").strip())
+except ValueError:
+    AUTO_PUBLISH_CHANNEL = 0
+if AUTO_PUBLISH_CHANNEL in BLOCKED_CHANNEL_IDS:
+    logger.warning("AUTO_PUBLISH_CHANNEL is blocked - migration disabled")
+    AUTO_PUBLISH_CHANNEL = 0
+MIGRATE_GAP = float(os.environ.get("MIGRATE_GAP", "3.2"))
+migrated_collection = db["migrated_posts"]
+if SOURCE_CHANNEL_IDS and AUTO_PUBLISH_CHANNEL:
+    logger.info(
+        "Migration enabled: %d source channel(s) -> %s",
+        len(SOURCE_CHANNEL_IDS), AUTO_PUBLISH_CHANNEL,
+    )
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -1351,6 +1379,302 @@ async def cancel_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ---------- ===================== Forwarded Movie → Database Channel ===================== ----------
+# ============================================================
+# 🔁 Migration: source channel post -> new post in AUTO_PUBLISH_CHANNEL
+# ============================================================
+
+_MIG_JUNK = (
+    re.compile(r"myint\s*myat\s*thu", re.I),
+    re.compile(r"credit", re.I),
+    re.compile(r"upload(?:ed)?\s*by", re.I),
+)
+_MIG_URL = re.compile(
+    r"(?:https?://|www\.|t\.me/|telegram\.me/|telegram\.dog/|tg://)\S*", re.I)
+
+_mig_albums = {}
+MIG_QUIET_PERIOD = 2.5
+MIG_MAX_WAIT = 20.0
+
+
+def clean_migrate_caption(text):
+    """Drop credit / watermark / link lines from a caption, keep the rest."""
+    if not text:
+        return ""
+    keep = []
+    for ln in text.replace("\r", "").split("\n"):
+        if any(p.search(ln) for p in _MIG_JUNK):
+            continue
+        stripped = _MIG_URL.sub("", ln).strip()
+        if not stripped:
+            if keep and keep[-1] != "":
+                keep.append("")
+            continue
+        keep.append(stripped)
+    out = "\n".join(keep)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _mig_source_id(message):
+    origin = getattr(message, "forward_origin", None)
+    chat = getattr(origin, "chat", None) if origin is not None else None
+    if chat is not None:
+        return chat.id
+    fwd = getattr(message, "forward_from_chat", None)
+    return fwd.id if fwd is not None else None
+
+
+def _mig_source_msg_id(message):
+    origin = getattr(message, "forward_origin", None)
+    mid = getattr(origin, "message_id", None) if origin is not None else None
+    if mid:
+        return int(mid)
+    mid = getattr(message, "forward_from_message_id", None)
+    return int(mid) if mid else None
+
+
+def _strip_ext(name):
+    base = name or ""
+    for ext in (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
+                ".m4v", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp"):
+        if base.lower().endswith(ext):
+            return base[: -len(ext)].strip()
+    return base
+
+
+def _mig_item(message):
+    if message.photo:
+        return {
+            "kind": "photo",
+            "file_id": message.photo[-1].file_id,
+            "file_name": "photo.jpg",
+            "caption": clean_migrate_caption(message.caption or ""),
+        }
+    media = message.video or message.document
+    if media is not None:
+        return {
+            "kind": "video",
+            "file_id": media.file_id,
+            "file_name": getattr(media, "file_name", None) or "movie.mp4",
+            "caption": clean_migrate_caption(message.caption or ""),
+        }
+    return None
+
+
+def _mig_title(items):
+    for it in items:
+        if it["kind"] == "photo" and it["caption"].strip():
+            first = it["caption"].strip().split("\n", 1)[0].strip()
+            if first:
+                return first
+    for it in items:
+        if it["caption"].strip():
+            first = it["caption"].strip().split("\n", 1)[0].strip()
+            if first and not first.isdigit():
+                return first
+    for it in items:
+        if it["kind"] != "photo":
+            return _strip_ext(it["file_name"])
+    return ""
+
+
+def _mig_synopsis(items, title):
+    best = ""
+    for it in items:
+        cap = it["caption"].strip()
+        if len(cap) > len(best):
+            best = cap
+    if not best:
+        return ""
+    lines = best.split("\n")
+    if lines and lines[0].strip().lower() == title.strip().lower():
+        lines = lines[1:]
+    return clean_migrate_caption("\n".join(lines))
+
+
+def _mig_keyboard(deep_link):
+    buttons = [[InlineKeyboardButton("🎬 ဇာတ်ကားရယူရန်", url=deep_link)]]
+    for idx, link in enumerate(OTHER_CHANNELS, 1):
+        if idx == 1:
+            buttons.append([InlineKeyboardButton("🎬 ဇာတ်ကားချန်နယ်", url=link)])
+        elif idx == 2:
+            buttons.append([InlineKeyboardButton("👥 လူကြီးချန်နယ်", url=link)])
+        elif idx == 3:
+            buttons.append([InlineKeyboardButton("🎵 မြန်မာသီချင်းချန်နယ်", url=link)])
+        else:
+            buttons.append([InlineKeyboardButton(f"Channel {idx}", url=link)])
+    if MUSIC_CHANNEL_LINK:
+        buttons.append([InlineKeyboardButton("🎵 သီချင်း/တရားတော် 🙏", url=MUSIC_CHANNEL_LINK)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _cancel_mig_task(entry):
+    task = entry.get("task")
+    if task and not task.done():
+        task.cancel()
+
+
+async def _mig_flush_later(context: ContextTypes.DEFAULT_TYPE, key: str):
+    await asyncio.sleep(MIG_QUIET_PERIOD)
+    entry = _mig_albums.get(key)
+    if not entry:
+        return
+    now = time.monotonic()
+    quiet = now - entry["last_update"]
+    total = now - entry["started"]
+    if total < MIG_MAX_WAIT and quiet < MIG_QUIET_PERIOD:
+        entry["task"] = context.application.create_task(
+            _mig_flush_later(context, key))
+        return
+    _mig_albums.pop(key, None)
+    try:
+        await _mig_publish(context, key, entry["items"])
+    except Exception as exc:
+        logger.error("migration publish failed (%s): %s", key, exc, exc_info=True)
+
+
+async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items):
+    if not AUTO_PUBLISH_CHANNEL or not items:
+        return
+
+    title = _mig_title(items) or "🎬 ဇာတ်ကားအသစ်"
+    title = clean_migrate_caption(title)[:200].strip() or "🎬 ဇာတ်ကားအသစ်"
+    synopsis = _mig_synopsis(items, title)
+
+    videos = [it for it in items if it["kind"] != "photo"]
+    photos = [it for it in items if it["kind"] == "photo"]
+
+    payload = generate_payload()
+    for it in videos:
+        save_file_info(payload, it["file_id"], it["file_name"], title)
+    deep_link = create_deep_linked_url(context.bot.username, payload)
+    reply_markup = _mig_keyboard(deep_link)
+
+    header = "📝 ဇာတ်ကားအကြောင်း"
+    caption = title
+    if synopsis:
+        caption += f"\n\n{header}\n\n{synopsis}"
+    if len(caption) > 1024:
+        caption = caption[:1020].rstrip() + "..."
+
+    sent = None
+    if photos:
+        sent = await _with_flood(lambda: context.bot.send_photo(
+            chat_id=AUTO_PUBLISH_CHANNEL,
+            photo=photos[0]["file_id"],
+            caption=caption,
+            reply_markup=reply_markup,
+        ))
+    elif videos:
+        sent = await _with_flood(lambda: context.bot.send_video(
+            chat_id=AUTO_PUBLISH_CHANNEL,
+            video=videos[0]["file_id"],
+            caption=caption,
+            reply_markup=reply_markup,
+            supports_streaming=True,
+        ))
+
+    if sent is None:
+        logger.info("migration skipped (no media): %s", title)
+        migrated_collection.update_one(
+            {"_id": key},
+            {"$set": {"done": True, "skipped": "no_media", "title": title}},
+            upsert=True,
+        )
+        return
+
+    logger.info(
+        "migration published '%s' (%d media) -> %s id=%s",
+        title, len(items), AUTO_PUBLISH_CHANNEL, sent.message_id,
+    )
+    migrated_collection.update_one(
+        {"_id": key},
+        {"$set": {
+            "done": True,
+            "title": title,
+            "post_id": sent.message_id,
+            "published_at": time.time(),
+        }},
+        upsert=True,
+    )
+    await asyncio.sleep(MIGRATE_GAP * max(1, len(items)))
+
+
+async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """source channel ကနေ forward လာတဲ့ post ကို ဖမ်းပြီး buffer လုပ်ပါတယ်။"""
+    message = update.message
+    if message is None or not SOURCE_CHANNEL_IDS or not AUTO_PUBLISH_CHANNEL:
+        return
+
+    src = _mig_source_id(message)
+    if src is None or src not in SOURCE_CHANNEL_IDS:
+        return
+    if message.chat_id == AUTO_PUBLISH_CHANNEL:
+        return
+
+    item = _mig_item(message)
+    if item is None:
+        return
+
+    src_msg_id = _mig_source_msg_id(message)
+    group_id = getattr(message, "media_group_id", None)
+    key = (f"{src}:g{group_id}" if group_id
+           else f"{src}:m{src_msg_id or message.message_id}")
+
+    doc = migrated_collection.find_one({"_id": key})
+    if doc and doc.get("done"):
+        raise ApplicationHandlerStop
+
+    now = time.monotonic()
+    if key not in _mig_albums:
+        _mig_albums[key] = {
+            "items": [],
+            "started": now,
+            "last_update": now,
+            "chat_id": message.chat_id,
+        }
+    entry = _mig_albums[key]
+    entry["items"].append(item)
+    entry["last_update"] = now
+
+    _cancel_mig_task(entry)
+    entry["task"] = context.application.create_task(
+        _mig_flush_later(context, key))
+
+    try:
+        migrated_collection.update_one(
+            {"_id": key},
+            {"$setOnInsert": {
+                "source": src,
+                "group": group_id,
+                "src_msg_id": src_msg_id,
+                "ts": time.time(),
+            }},
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning("migration record failed: %s", exc)
+
+    raise ApplicationHandlerStop
+
+
+async def migrate_posts_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    total = migrated_collection.count_documents({})
+    done = migrated_collection.count_documents({"done": True})
+    skipped = migrated_collection.count_documents({"skipped": {"$exists": True}})
+    await update.message.reply_text(
+        f"🔁 Migration\n\n"
+        f"လက်ခံရရှိ: {total}\n"
+        f"တင်ပြီး: {done - skipped}\n"
+        f"ကျော်: {skipped}\n"
+        f"ကျန် (buffer): {len(_mig_albums)}\n"
+        f"Target: {AUTO_PUBLISH_CHANNEL}\n"
+        f"Sources: {len(SOURCE_CHANNEL_IDS)}"
+    )
+
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Anyone forwards a movie → bot stores it in the database channel.
 
@@ -2049,6 +2373,8 @@ def build_application(token):
     )
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_migrate_forward), group=-1)
+    application.add_handler(CommandHandler("migrate_posts", migrate_posts_status))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
     application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
