@@ -379,6 +379,17 @@ def _mig_extra_sources():
     return ids
 
 
+def _mig_add_extra_source(channel_id):
+    """Remember a channel the admin forwarded from, so its posts publish."""
+    try:
+        db["config"].update_one(
+            {"_id": "migration"},
+            {"$addToSet": {"extra_sources": int(channel_id)}}, upsert=True)
+        _MIG_EXTRA_CACHE["ts"] = 0.0
+    except Exception as exc:
+        logger.warning("extra source save failed: %s", exc)
+
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -2355,9 +2366,16 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     src = _mig_source_id(message)
-    if src is None or (src not in SOURCE_CHANNEL_IDS
-                       and src not in _mig_extra_sources()):
+    if src is None:
         return
+    if src not in SOURCE_CHANNEL_IDS and src not in _mig_extra_sources():
+        # Admin forwarded from a channel we do not track yet: accept it and
+        # remember the channel so this "send it to the bot" flow always works.
+        uid = update.effective_user.id if update.effective_user else 0
+        if not is_admin(uid):
+            return
+        _mig_add_extra_source(src)
+        logger.info("new source channel accepted from admin forward: %s", src)
     if message.chat_id == AUTO_PUBLISH_CHANNEL:
         return
 
