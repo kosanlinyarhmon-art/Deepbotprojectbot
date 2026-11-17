@@ -1710,6 +1710,15 @@ async def migrate_posts_status(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Sources: {len(SOURCE_CHANNEL_IDS)}"
     )
 
+async def migrate_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear dedupe records so a channel can be re-migrated from scratch."""
+    if not is_admin(update.effective_user.id):
+        return
+    removed = migrated_collection.delete_many({}).deleted_count
+    _mig_albums.clear()
+    await update.message.reply_text(f"♻️ Migration state cleared ({removed} records).")
+
+
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Anyone forwards a movie → bot stores it in the database channel.
 
@@ -2410,6 +2419,7 @@ def build_application(token):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_migrate_forward), group=-1)
     application.add_handler(CommandHandler("migrate_posts", migrate_posts_status))
+    application.add_handler(CommandHandler("migrate_reset", migrate_reset_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
     application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
