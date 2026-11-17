@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       InputMediaPhoto, InputMediaVideo)
-from telegram.error import TelegramError, InvalidToken
+from telegram.error import TelegramError, InvalidToken, BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler, ApplicationHandlerStop, TypeHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
@@ -138,6 +138,31 @@ def status():
     except Exception as exc:
         out["forwarder"] = {"error": str(exc)}
     return jsonify(out)
+
+
+@app.route('/series')
+def series_info():
+    """Read-only: every series doc with how many files its deep link holds."""
+    from flask import jsonify, request
+    lim = min(int(request.args.get("limit") or 60), 300)
+    out = []
+    try:
+        for d in migrated_collection.find(
+                {"series_key": {"$exists": True}}).limit(lim):
+            files = get_file_info(d.get("payload") or "") or []
+            out.append({
+                "title": d.get("title"),
+                "post_id": d.get("post_id"),
+                "button_id": d.get("button_id"),
+                "files": len(files),
+                "eps": d.get("eps"),
+                "seasons": d.get("seasons"),
+                "src": d.get("source"),
+                "reposted": bool(d.get("reposted_at")),
+            })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "count": len(out), "series": out})
 
 
 @app.route('/payload')
@@ -1621,7 +1646,14 @@ def _mig_series_key(item):
 
     Episodes of one series share this key, so they end up on ONE post with ONE
     deep link.  A different title/caption gives a different key -> new post.
+
+    A title with NO episode/season marker anywhere is a movie, not a series -
+    otherwise "Iron Man 2" / "Iron Man 3" would be labelled as episodes of
+    "Iron Man". Those return "" and are handled by the movie batching path.
     """
+    raw = f"{item.get('caption') or ''} {item.get('file_name') or ''}"
+    if not (_MIG_EP_MARK.search(raw) or _MIG_EP_LIST.search(raw)):
+        return ""
     title = _mig_clean_title(_mig_item_title(item))
     base = clean_migrate_caption(_mig_series_base(title))
     base = re.sub(r"\s+\d{1,2}$", "", base)  # trailing part number
@@ -2230,6 +2262,22 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
             )
         except Exception as exc:
             logger.warning("series caption update failed (%s): %s", title, exc)
+
+    # A post published before its first video had no deep-link button at all:
+    # attach the SAME payload link now so the whole series is reachable.
+    if post_id and not button_id and payload:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=AUTO_PUBLISH_CHANNEL,
+                message_id=int(post_id),
+                reply_markup=_mig_keyboard(
+                    create_deep_linked_url(context.bot.username, payload)),
+            )
+            button_id = int(post_id)
+            migrated_collection.update_one(
+                {"_id": sdoc["_id"]}, {"$set": {"button_id": button_id}})
+        except Exception as exc:
+            logger.warning("series markup add failed (%s): %s", title, exc)
 
     migrated_collection.update_one(
         {"_id": sdoc["_id"]},
@@ -3210,6 +3258,13 @@ async def _seriesmerge_locked(bot, dry=False):
                 logger.warning("seriesmerge delete failed %s: %s", pid, exc)
                 failed += 1
                 continue
+            extra_btn = d.get("button_id")
+            if extra_btn and int(extra_btn) != pid:
+                try:
+                    await bot.delete_message(
+                        AUTO_PUBLISH_CHANNEL, int(extra_btn))
+                except Exception:
+                    pass
             migrated_collection.update_one(
                 {"_id": d["_id"]},
                 {"$set": {"merged_into": f"post:{keep_id}"}})
@@ -3253,6 +3308,177 @@ async def _epsfix_once(bot, admin_chat):
         logger.warning("epsfix once failed: %s", exc)
 
 
+async def _repost_single_post(bot, doc, payload, files):
+    """Rebuild a post as ONE photo + inline deep-link buttons (10385 format)."""
+    title = doc.get("title") or "🎬 ဇာတ်ကားအသစ်"
+    caption = _mig_build_caption(
+        title, doc.get("synopsis") or "",
+        doc.get("seasons") or [], doc.get("eps") or [])
+    markup = _mig_keyboard(create_deep_linked_url(bot.username, payload))
+    new_id = None
+    db_id = doc.get("db_post_id")
+    if DATABASE_CHANNEL_ID and db_id:
+        try:
+            msg = await bot.copy_message(
+                chat_id=AUTO_PUBLISH_CHANNEL,
+                from_chat_id=int(DATABASE_CHANNEL_ID.strip()),
+                message_id=int(db_id))
+            new_id = msg.message_id
+            try:
+                await bot.edit_message_caption(
+                    chat_id=AUTO_PUBLISH_CHANNEL, message_id=new_id,
+                    caption=caption)
+            except Exception as exc:
+                logger.warning("repost caption failed %s: %s", new_id, exc)
+        except Exception as exc:
+            logger.warning("repost copy failed %s: %s", db_id, exc)
+            new_id = None
+    if new_id is None:
+        f = next((x for x in files if x.get("file_id")), None)
+        if not f:
+            return None
+        try:
+            msg = await bot.send_video(
+                chat_id=AUTO_PUBLISH_CHANNEL, video=f["file_id"],
+                caption=caption, supports_streaming=True)
+            new_id = msg.message_id
+        except Exception as exc:
+            logger.error("repost send failed: %s", exc)
+            return None
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=AUTO_PUBLISH_CHANNEL, message_id=new_id,
+            reply_markup=markup)
+    except Exception as exc:
+        logger.warning("repost markup failed %s: %s", new_id, exc)
+    return new_id
+
+
+async def _repair_posts(bot, limit=25):
+    """Delete bad old posts and repost them as ONE photo + buttons.
+
+    Bad = album-era post (buttons on a separate message) or a post with no
+    deep-link button at all. Also drops a Season/Episode line that was wrongly
+    added to a movie bundle (e.g. "Iron Man 2" counted as an episode).
+    """
+    docs = list(migrated_collection.find({
+        "post_id": {"$exists": True},
+        "merged_into": {"$exists": False},
+    }).sort("published_at", -1))
+    fixed = reposted = 0
+    for d in docs:
+        if fixed + reposted >= limit:
+            break
+        payload = d.get("payload")
+        if not payload:
+            continue
+        files = get_file_info(payload) or []
+        if not files:
+            continue
+        pid = int(d["post_id"])
+        btn = d.get("button_id")
+        album_era = bool(btn) and int(btn) != pid
+
+        names = [f.get("file_name") or "" for f in files]
+        marked = any(_MIG_EP_MARK.search(n) or _MIG_EP_LIST.search(n)
+                     for n in names)
+        wrong_label = bool(d.get("series_key") and not marked
+                           and (d.get("seasons") or d.get("eps")))
+        if wrong_label:
+            # These are sequels (movies), not episodes: forget the numbers.
+            d["seasons"] = []
+            d["eps"] = []
+            migrated_collection.update_one(
+                {"_id": d["_id"]},
+                {"$set": {"seasons": [], "eps": [], "episodes": len(files)}})
+        if wrong_label and not album_era:
+            caption = _mig_build_caption(d.get("title") or "",
+                                         d.get("synopsis") or "")
+            try:
+                await bot.edit_message_caption(
+                    chat_id=AUTO_PUBLISH_CHANNEL, message_id=pid,
+                    caption=caption)
+                migrated_collection.update_one(
+                    {"_id": d["_id"]}, {"$set": {"caption": caption}})
+                fixed += 1
+                continue
+            except Exception as exc:
+                logger.warning("repair caption failed %s: %s", pid, exc)
+
+        if album_era:
+            new_id = await _repost_single_post(bot, d, payload, files)
+            if not new_id:
+                continue
+            for old in (pid, int(btn)):
+                if old and old != new_id:
+                    try:
+                        await bot.delete_message(AUTO_PUBLISH_CHANNEL, old)
+                    except Exception:
+                        pass
+            migrated_collection.update_one(
+                {"_id": d["_id"]},
+                {"$set": {"post_id": new_id, "button_id": None,
+                          "reposted_at": time.time()}})
+            reposted += 1
+            logger.info("repair: album post %s -> single post %s (%s)",
+                        pid, new_id, d.get("title"))
+            await asyncio.sleep(1.5)
+            continue
+
+        if not btn:
+            ok = False
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=AUTO_PUBLISH_CHANNEL, message_id=pid,
+                    reply_markup=_mig_keyboard(
+                        create_deep_linked_url(bot.username, payload)))
+                ok = True
+            except BadRequest as exc:
+                # Same buttons already there -> nothing to do, just remember it.
+                ok = "not modified" in str(exc).lower()
+                if not ok:
+                    logger.info("repair markup skipped %s: %s", pid, exc)
+            except Exception as exc:
+                logger.info("repair markup skipped %s: %s", pid, exc)
+            if ok:
+                migrated_collection.update_one(
+                    {"_id": d["_id"]}, {"$set": {"button_id": pid}})
+                fixed += 1
+                await asyncio.sleep(0.6)
+            else:
+                new_id = await _repost_single_post(bot, d, payload, files)
+                if new_id:
+                    try:
+                        await bot.delete_message(AUTO_PUBLISH_CHANNEL, pid)
+                    except Exception:
+                        pass
+                    migrated_collection.update_one(
+                        {"_id": d["_id"]},
+                        {"$set": {"post_id": new_id, "button_id": None,
+                                  "reposted_at": time.time()}})
+                    reposted += 1
+    return fixed, reposted
+
+
+async def _repair_once(bot):
+    """Clean up the whole backlog right after a deploy, in small batches."""
+    await asyncio.sleep(90)
+    total_f = total_r = 0
+    for _ in range(8):
+        try:
+            f, r = await _repair_posts(bot, limit=25)
+        except Exception as exc:
+            logger.warning("repair once failed: %s", exc)
+            break
+        total_f += f
+        total_r += r
+        if f + r == 0:
+            break
+        await asyncio.sleep(5)
+    if total_f or total_r:
+        logger.info("repair once: fixed=%d reposted=%d", total_f, total_r)
+
+
 async def _seriesmerge_loop(bot):
     """Keep merging while the cloud forwarder is still filling the channel."""
     await asyncio.sleep(300)
@@ -3266,6 +3492,9 @@ async def _seriesmerge_loop(bot):
                 if m or d or r:
                     logger.info("seriesmerge loop: groups=%d merged=%d "
                                 "deleted=%d renamed=%d", len(g), m, d, r)
+                rf, rr = await _repair_posts(bot, limit=10)
+                if rf or rr:
+                    logger.info("repair loop: fixed=%d reposted=%d", rf, rr)
             was = on
         except Exception as exc:
             logger.warning("seriesmerge loop failed: %s", exc)
@@ -3291,6 +3520,7 @@ async def _epsfix_post_init(application):
         except Exception as exc:
             logger.warning("boot notice failed: %s", exc)
         application.create_task(_seriesmerge_loop(application.bot))
+        application.create_task(_repair_once(application.bot))
         if db["config"].find_one({"_id": "backfill2_once"}):
             return
         db["config"].update_one({"_id": "backfill2_once"},
