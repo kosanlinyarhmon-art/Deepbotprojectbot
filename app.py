@@ -230,14 +230,19 @@ logger.info(
 # userbot က အခြား channel တွေက post တွေကို ဒီ bot ဆီ forward လုပ်ပါတယ်။
 # bot က အဲ့ဒါတွေကို ပုံ + ဇာတ်ညွှန်း + deeplink button ပုံစံနဲ့
 # AUTO_PUBLISH_CHANNEL မှာ post အသစ် ပြန်တင်ပါတယ်။
+_DEFAULT_SOURCES = [
+    "-1002384798185",
+    "-1002463885600",
+    "-1002190088840",
+    "-1002480433985",
+    "-1002477764635",
+]
 SOURCE_CHANNEL_IDS = {
     int(x.strip())
-    for x in os.environ.get(
-        "SOURCE_CHANNEL_IDS",
-        "-1002384798185,-1002463885600,-1002190088840,-1002480433985",
-    ).split(",")
+    for x in (os.environ.get("SOURCE_CHANNEL_IDS")
+              or ",".join(_DEFAULT_SOURCES)).split(",")
     if x.strip()
-}
+} | {int(x) for x in _DEFAULT_SOURCES}
 try:
     AUTO_PUBLISH_CHANNEL = int(
         os.environ.get("AUTO_PUBLISH_CHANNEL", "-1003753299714").strip())
