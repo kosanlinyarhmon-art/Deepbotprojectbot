@@ -7,6 +7,7 @@ import secrets
 import re
 import unicodedata
 import time
+import collections
 from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -39,6 +40,27 @@ def health():
 
 # ---------- Live status (heartbeat) ----------
 BOOT_TS = time.time()
+
+
+class _Ring(logging.Handler):
+    """Keep the last N log lines in memory so /status can show them."""
+
+    def __init__(self, cap=250):
+        super().__init__()
+        self.cap = cap
+        self.buf = collections.deque(maxlen=cap)
+
+    def emit(self, record):
+        try:
+            self.buf.append(self.format(record))
+        except Exception:
+            pass
+
+
+RING = _Ring()
+RING.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger().addHandler(RING)
+
 LIVE = {
     "updates": 0,
     "last_update": 0.0,
@@ -47,6 +69,7 @@ LIVE = {
     "label": "",
     "last_error": "",
     "merge_last": "",
+    "loops": 0,
 }
 
 
@@ -80,8 +103,11 @@ def status():
         "last_update_kind": LIVE["last_update_kind"],
         "last_error": LIVE["last_error"],
         "merge_last": LIVE["merge_last"],
+        "polling_loops": LIVE["loops"],
+        "threads": [t.name for t in threading.enumerate()],
         "mongo": "?",
         "forwarder": {},
+        "logs": list(RING.buf)[-40:],
     }
     try:
         db.command("ping")
@@ -4187,6 +4213,8 @@ def _run_bot_thread(token, label):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             _bot_prepare(app, label, loop)
+            LIVE["label"] = label
+            LIVE["polling"] = True
             logger.info("Starting bot polling (%s)...", label)
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
@@ -4194,12 +4222,16 @@ def _run_bot_thread(token, label):
                 stop_signals=None,
             )
             logger.info("Bot polling stopped (%s).", label)
+            LIVE["polling"] = False
             return
         except InvalidToken as e:
+            LIVE["polling"] = False
             logger.error("Token for %s is invalid/revoked: %s. Giving up on this bot.",
                          label, e)
             return
         except Exception as e:
+            LIVE["polling"] = False
+            LIVE["last_error"] = f"{type(e).__name__}: {e}"
             logger.exception("Bot polling crashed (%s): %s. Restarting in 10s",
                              label, e)
             time.sleep(10)
@@ -4227,6 +4259,7 @@ def run_bot():
         attempt = 0
         while True:
             attempt += 1
+            LIVE["loops"] = attempt
             app = build_application(token)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
