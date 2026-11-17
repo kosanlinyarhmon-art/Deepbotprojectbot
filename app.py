@@ -74,18 +74,15 @@ LIVE = {
 }
 
 
-def _hb(update, context):
+async def _hb(update, context):
     """Middleware-style counter so /status can prove polling is alive."""
-    LIVE["updates"] += 1
-    LIVE["last_update"] = time.time()
     try:
+        LIVE["updates"] += 1
+        LIVE["last_update"] = time.time()
         LIVE["last_update_kind"] = (
             "message" if update.message else
             "callback" if update.callback_query else
             "member" if update.chat_member else "other")
-    except Exception:
-        pass
-    try:
         b = LIVE["bots"].get(str(context.bot.id))
         if b is not None:
             b["updates"] = b.get("updates", 0) + 1
