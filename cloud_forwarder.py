@@ -141,8 +141,9 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay,
     if st.get("done") and not watch:
         log(f"== SKIP {title} (already finished)")
         return
-    log(f"== START {title} ({source_id}) resume from id > {last_id}")
-    notify(f"🚚 စတင်ပါပြီ: {title}\nid {last_id} ကနေ ဆက်တင်နေတယ်")
+    if not watch:
+        log(f"== START {title} ({source_id}) resume from id > {last_id}")
+        notify(f"🚚 စတင်ပါပြီ: {title}\nid {last_id} ကနေ ဆက်တင်နေတယ်")
 
     pending = []
     sent = 0
@@ -211,8 +212,12 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay,
                 upsert=True)
         else:
             state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
-        log(f"== DONE {title}")
-        notify(f"✅ ပြီးသွားပြီ: {title} ({sent} msg)")
+        if watch:
+            if sent:
+                log(f"== NEW {title}: {sent} msg")
+        else:
+            log(f"== DONE {title}")
+            notify(f"✅ ပြီးသွားပြီ: {title} ({sent} msg)")
 
 
 async def forward_hub(client, bot, raw_hub, per_item, min_delay, watch=False):
@@ -333,8 +338,12 @@ async def forward_hub(client, bot, raw_hub, per_item, min_delay, watch=False):
                 upsert=True)
         else:
             state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
-        log(f"== DONE hub {title} ({sent} msgs)")
-        notify(f"✅ Hub ပြီးသွားပြီ: {title} ({sent} msg)")
+        if watch:
+            if sent:
+                log(f"== NEW hub {title}: {sent} msg")
+        else:
+            log(f"== DONE hub {title} ({sent} msgs)")
+            notify(f"✅ Hub ပြီးသွားပြီ: {title} ({sent} msg)")
 
 
 _EXTRA_ADDED = set()
@@ -383,26 +392,31 @@ async def _run():
         except Exception as exc:
             log(f"warning: /start failed: {exc}")
 
-    # link hubs first: they are short and unlock the newest series quickly
-    hubs = cfg.get("hubs") or DEFAULT_HUBS
-    for hub in hubs:
+    # 24/7: keep the userbot connected and re-scan for new posts. Reconnecting
+    # every few minutes would force a fresh session login each time.
+    while not _stop:
+        hubs = config().get("hubs") or DEFAULT_HUBS
+        for hub in hubs:
+            if _stop:
+                break
+            await forward_hub(client, bot, hub, per_item, min_delay, watch)
+
+        for src in (config().get("sources") or DEFAULT_SOURCES):
+            if _stop:
+                break
+            await forward_channel(client, bot, src, per_item, min_delay, watch)
+
         if _stop:
             break
-        await forward_hub(client, bot, hub, per_item, min_delay, watch)
-
-    for src in sources:
-        if _stop:
-            break
-        await forward_channel(client, bot, src, per_item, min_delay, watch)
-
-    if not _stop:
-        if watch:
-            # 24/7 mode: stay connected and keep checking for new posts.
-            log("scan finished - watching for new posts")
-            set_config(enabled=True, watching=True, last_scan=time.time())
-        else:
+        if not watch:
             log("all channels finished")
             set_config(enabled=False, finished_at=time.time())
+            break
+        interval = int(config().get("watch_interval") or 300)
+        set_config(enabled=True, watching=True, last_scan=time.time())
+        log(f"scan finished - watching for new posts (next scan in {interval}s)")
+        await asyncio.sleep(interval)
+
     await client.disconnect()
     _client = None
 
@@ -416,15 +430,9 @@ def main_thread():
             asyncio.run(_run())
         except Exception as exc:
             logger.exception("forwarder crashed: %s", exc)
-        cfg = config()
-        if _stop or not cfg.get("enabled"):
+        if _stop or not config().get("enabled"):
             return
-        if cfg.get("watch", True):
-            interval = int(cfg.get("watch_interval") or 300)
-            log(f"idle {interval}s, then scan again")
-            time.sleep(interval)
-        else:
-            time.sleep(30)
+        time.sleep(30)
 
 
 def start_in_background():
