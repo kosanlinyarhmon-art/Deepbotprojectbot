@@ -1401,9 +1401,27 @@ _MIG_QUALITY = re.compile(
 )
 
 _mig_albums = {}
+_mig_last_photo = {}
 _MIG_PUBLISH_LOCK = asyncio.Lock()
-MIG_QUIET_PERIOD = 2.5
-MIG_MAX_WAIT = 20.0
+MIG_QUIET_PERIOD = 2.0
+MIG_QUIET_PHOTO = 6.5
+MIG_MAX_WAIT = 45.0
+
+
+def _mig_tokens(text):
+    t = re.sub(r"[^0-9a-z\u1000-\u109f]+", " ", (text or "").lower())
+    return {w for w in t.split() if len(w) > 2}
+
+
+def _mig_same_movie(photo_title, video_caption, video_name):
+    """True when a video belongs to the photo post before it."""
+    pt = _mig_tokens(photo_title)
+    if not pt:
+        return False
+    vt = _mig_tokens(f"{video_caption} {_clean_file_title(video_name or '')}")
+    if not vt:
+        return False
+    return len(pt & vt) / len(pt) >= 0.6
 
 
 def clean_migrate_caption(text):
@@ -1553,11 +1571,14 @@ async def _mig_flush_later(context: ContextTypes.DEFAULT_TYPE, key: str):
     now = time.monotonic()
     quiet = now - entry["last_update"]
     total = now - entry["started"]
-    if total < MIG_MAX_WAIT and quiet < MIG_QUIET_PERIOD:
+    quiet_limit = entry.get("quiet", MIG_QUIET_PERIOD)
+    if total < MIG_MAX_WAIT and quiet < quiet_limit:
         entry["task"] = context.application.create_task(
             _mig_flush_later(context, key))
         return
     _mig_albums.pop(key, None)
+    if _mig_last_photo.get(entry.get("src")) == key:
+        _mig_last_photo.pop(entry.get("src"), None)
     try:
         await _mig_publish(context, key, entry["items"])
     except Exception as exc:
@@ -1699,8 +1720,29 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
 
     src_msg_id = _mig_source_msg_id(message)
     group_id = getattr(message, "media_group_id", None)
-    key = (f"{src}:g{group_id}" if group_id
-           else f"{src}:m{src_msg_id or message.message_id}")
+    is_photo = item["kind"] == "photo"
+
+    if group_id:
+        key = f"{src}:g{group_id}"
+    elif is_photo:
+        key = f"{src}:p{src_msg_id or message.message_id}"
+        _mig_last_photo[src] = key
+    else:
+        # A photo followed by its own 720p/1080p files (separate messages):
+        # attach the video to the photo's post when the title matches.
+        key = None
+        pk = _mig_last_photo.get(src)
+        if pk and pk in _mig_albums:
+            pending = _mig_albums[pk]
+            photo_item = next(
+                (i for i in pending["items"] if i["kind"] == "photo"), None)
+            if (photo_item and time.monotonic() - pending["started"] < 90
+                    and _mig_same_movie(
+                        photo_item["caption"].strip().split("\n", 1)[0],
+                        item["caption"], item["file_name"])):
+                key = pk
+        if key is None:
+            key = f"{src}:m{src_msg_id or message.message_id}"
 
     doc = migrated_collection.find_one({"_id": key})
     if doc and doc.get("done"):
@@ -1713,6 +1755,8 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
             "started": now,
             "last_update": now,
             "chat_id": message.chat_id,
+            "src": src,
+            "quiet": MIG_QUIET_PERIOD if group_id else MIG_QUIET_PHOTO,
         }
     entry = _mig_albums[key]
     entry["items"].append(item)
@@ -1856,6 +1900,51 @@ async def dbfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     context.application.create_task(worker())
+
+
+async def dbinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        f"DB channel: {DATABASE_CHANNEL_ID}\n"
+        f"Target: {AUTO_PUBLISH_CHANNEL}\n"
+        f"Sources: {sorted(SOURCE_CHANNEL_IDS)}")
+
+
+async def dbcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Report which migration posts are missing their movie file in the DB channel."""
+    if not is_admin(update.effective_user.id):
+        return
+    no_payload = []
+    no_files = []
+    not_saved = []
+    ok = 0
+    for d in migrated_collection.find({"post_id": {"$exists": True}}):
+        payload = d.get("payload")
+        if not payload:
+            no_payload.append(d.get("post_id"))
+            continue
+        files = get_file_info(payload)
+        if not files:
+            no_files.append(d.get("post_id"))
+            continue
+        if any(not f.get("channel_message_id") for f in files):
+            not_saved.append(d.get("post_id"))
+            continue
+        ok += 1
+    lines = [
+        "🗄️ DB check",
+        f"complete: {ok}",
+        f"no payload (old): {len(no_payload)}",
+        f"payload but no file: {len(no_files)}",
+        f"file not saved to DB: {len(not_saved)}",
+    ]
+    for label, ids in (("no payload", no_payload), ("no file", no_files),
+                       ("not saved", not_saved)):
+        if ids:
+            lines.append(f"{label} ids: " + ",".join(str(i) for i in ids[:60]))
+    text = "\n".join(lines)
+    await update.message.reply_text(text[:3900])
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2561,6 +2650,8 @@ def build_application(token):
     application.add_handler(CommandHandler("migrate_reset", migrate_reset_command))
     application.add_handler(CommandHandler("dbsave", dbsave_command))
     application.add_handler(CommandHandler("dbfix", dbfix_command))
+    application.add_handler(CommandHandler("dbcheck", dbcheck_command))
+    application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
     application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
