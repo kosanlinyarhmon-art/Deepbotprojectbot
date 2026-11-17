@@ -1771,39 +1771,43 @@ async def dbsave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or not DATABASE_CHANNEL_ID:
         await update.message.reply_text("Usage: /dbsave <payload>")
         return
-    payload = context.args[0].strip()
-    files = get_file_info(payload)
-    if not files:
-        await update.message.reply_text("⚠️ payload not found.")
+    payloads = [a.strip() for a in context.args if a.strip()]
+    if not payloads:
+        await update.message.reply_text("Usage: /dbsave <payload> [payload...]")
         return
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     saved = skipped = failed = 0
-    for f in files:
-        if f.get("channel_message_id"):
-            skipped += 1
-            continue
-        cap = (f.get("file_caption") or "")[:1000]
-        try:
-            try:
-                sent_db = await _with_flood(lambda: context.bot.send_video(
-                    chat_id=db_chat,
-                    video=f["file_id"],
-                    caption=cap,
-                    supports_streaming=True,
-                ))
-            except TelegramError:
-                sent_db = await _with_flood(lambda: context.bot.send_document(
-                    chat_id=db_chat,
-                    document=f["file_id"],
-                    filename=f.get("file_name") or "movie.mp4",
-                    caption=cap,
-                ))
-            set_file_channel_message(payload, f["file_id"], sent_db.message_id)
-            saved += 1
-        except Exception as exc:
+    for payload in payloads:
+        files = get_file_info(payload)
+        if not files:
             failed += 1
-            logger.warning("dbsave failed for %s: %s", f.get("file_name"), exc)
-        await asyncio.sleep(1.5)
+            continue
+        for f in files:
+            if f.get("channel_message_id"):
+                skipped += 1
+                continue
+            cap = (f.get("file_caption") or "")[:1000]
+            try:
+                try:
+                    sent_db = await _with_flood(lambda: context.bot.send_video(
+                        chat_id=db_chat,
+                        video=f["file_id"],
+                        caption=cap,
+                        supports_streaming=True,
+                    ))
+                except TelegramError:
+                    sent_db = await _with_flood(lambda: context.bot.send_document(
+                        chat_id=db_chat,
+                        document=f["file_id"],
+                        filename=f.get("file_name") or "movie.mp4",
+                        caption=cap,
+                    ))
+                set_file_channel_message(payload, f["file_id"], sent_db.message_id)
+                saved += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning("dbsave failed for %s: %s", f.get("file_name"), exc)
+            await asyncio.sleep(1.2)
     await update.message.reply_text(
         f"🗄️ DB save\nsaved: {saved}\nskipped: {skipped}\nfailed: {failed}")
 
