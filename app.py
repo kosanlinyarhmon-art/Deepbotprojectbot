@@ -1396,7 +1396,7 @@ _MIG_JUNK = (
 # credit fragments that can sit inside a title line: "Savi (2024) (mmsub)Crd"
 _MIG_JUNK_STRIP = re.compile(
     r"(?:"
-    r"\bcrds?\b|\bcredits?\b|\bcrd\b|"
+    r"\bcrds?\b|\bcr\b|\bcredits?\b|\bcrd\b|"
     r"\bmmsubs?\b|\bmm\s*subs?\b|\bmyanmar\s*sub(?:title)?s?\b|"
     r"\b(?:sub|subs|subtitle|subtitles)\s*(?:by|:)\b[^|,\n]*|"
     r"upload(?:ed)?\s*by\b[^|,\n]*|"
@@ -1438,13 +1438,17 @@ _MIG_EP_MARK = re.compile(
     r")", re.I)
 _MIG_EP_NOISE = re.compile(
     r"\b(?:end|completed?|final|uncut|extended|full|all)\b", re.I)
+# "ep 1 +2+3", "ep 7 to 10", "ep 4+5+6"
+_MIG_EP_LIST = re.compile(
+    r"(?:\bep?\s*)?\b\d{1,3}\b(?:\s*(?:[+&,]|to|and|-|~)\s*\d{1,3}\b)+", re.I)
 
 
 def _mig_series_base(title):
     """Strip episode/season markers: 'Spider-Noir (2026) Ep 7' -> 'Spider-Noir (2026)'."""
     if not title:
         return ""
-    base = _MIG_EP_MARK.sub(" ", title)
+    base = _MIG_EP_LIST.sub(" ", title)
+    base = _MIG_EP_MARK.sub(" ", base)
     base = _MIG_EP_NOISE.sub(" ", base)
     base = re.sub(r"[\(\)\[\]\{\}\-_~|]+", " ", base)
     base = re.sub(r"\s{2,}", " ", base).strip(" .,-")
@@ -1458,12 +1462,12 @@ def _mig_series_key(item):
     deep link.  A different title/caption gives a different key -> new post.
     """
     title = _mig_item_title(item)
-    base = _mig_series_base(title)
+    base = clean_migrate_caption(_mig_series_base(title))
     if not base:
         return ""
     if not _MIG_QUALITY.sub("", base).strip():
         return ""
-    key = re.sub(r"[^0-9a-z\u1000-\u109f]+", "", base.lower())
+    key = re.sub(r"[^a-z\u1000-\u109f]+", "", base.lower())
     if len(key) < 4 or key.isdigit():
         return ""
     if not re.search(r"[a-z\u1000-\u109f]", key):
@@ -2185,12 +2189,12 @@ async def dbrepair_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _mig_title_series_key(title):
     """Series key from a stored post title (used by /seriesfix)."""
-    base = _mig_series_base(title or "")
+    base = clean_migrate_caption(_mig_series_base(title or ""))
     if not base:
         return ""
     if not _MIG_QUALITY.sub("", base).strip():
         return ""
-    key = re.sub(r"[^0-9a-z\u1000-\u109f]+", "", base.lower())
+    key = re.sub(r"[^a-z\u1000-\u109f]+", "", base.lower())
     if len(key) < 4 or key.isdigit():
         return ""
     if not re.search(r"[a-z\u1000-\u109f]", key):
@@ -2314,6 +2318,28 @@ async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         groups.setdefault(k, []).append(d)
     groups = {k: v for k, v in groups.items() if len(v) > 1}
 
+    # merge near-identical keys (source typos: "disenchanment" vs "disenchantment")
+    import difflib
+    keys = sorted(groups)
+    merged_groups = {}
+    taken = set()
+    for k in keys:
+        if k in taken:
+            continue
+        cluster = [k]
+        taken.add(k)
+        for k2 in keys:
+            if k2 in taken:
+                continue
+            if difflib.SequenceMatcher(None, k, k2).ratio() >= 0.86:
+                cluster.append(k2)
+                taken.add(k2)
+        items = []
+        for c in cluster:
+            items.extend(groups[c])
+        merged_groups[k] = items
+    groups = {k: v for k, v in merged_groups.items() if len(v) > 1}
+
     if dry:
         lines = [f"🧩 Series groups: {len(groups)}"]
         for k, items in list(groups.items())[:25]:
@@ -2349,8 +2375,9 @@ async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning("seriesfix markup failed %s: %s", keep_id, exc)
                 migrated_collection.update_one(
                     {"_id": keep["_id"]}, {"$set": {"payload": payload}})
-            base_title = (_mig_series_base(keep.get("title") or "")
-                          or keep.get("title") or "")
+            base_title = (clean_migrate_caption(
+                _mig_series_base(keep.get("title") or ""))
+                or keep.get("title") or "")
             for d in items[1:]:
                 pid = int(d["post_id"])
                 donor = d.get("payload")
