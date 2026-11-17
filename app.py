@@ -1387,11 +1387,18 @@ _MIG_JUNK = (
     re.compile(r"myint\s*myat\s*thu", re.I),
     re.compile(r"credit", re.I),
     re.compile(r"upload(?:ed)?\s*by", re.I),
+    re.compile(r"copyright\s*disclaimer|no copyright infringement", re.I),
     re.compile(r"\bjoin\b", re.I),
 )
 _MIG_URL = re.compile(
     r"(?:https?://|www\.|t\.me/|telegram\.me/|telegram\.dog/|tg://)\S*", re.I)
 _MIG_SYMBOLS = re.compile(r"^[\W_]+$", re.UNICODE)
+_MIG_SPACED = re.compile(r"\b(?:[A-Za-z][._\-]){2,}[A-Za-z]\b")
+_MIG_QUALITY = re.compile(
+    r"\b(?:2160p|1440p|1080p|720p|480p|360p|web[- ]?dl|webrip|web|bluray|"
+    r"hevc|h\.?264|h\.?265|x264|x265|aac|nf|amzn|dsnp|hmax|k2|hevcmp4)\b",
+    re.I,
+)
 
 _mig_albums = {}
 _MIG_PUBLISH_LOCK = asyncio.Lock()
@@ -1420,7 +1427,7 @@ def clean_migrate_caption(text):
     out = "\n".join(keep)
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
-    return out.strip()
+    return _fix_spaced(out.strip())
 
 
 def _mig_source_id(message):
@@ -1469,20 +1476,36 @@ def _mig_item(message):
     return None
 
 
+def _fix_spaced(text):
+    """Merge watermark-style spaced letters: B_r_i_d_g_e_r_t_o_n -> Bridgerton."""
+    def repl(m):
+        letters = re.sub(r"[^A-Za-z]", "", m.group(0))
+        return letters if len(letters) >= 4 else m.group(0)
+    return _MIG_SPACED.sub(repl, text)
+
+
+def _clean_file_title(name):
+    base = _strip_ext(name)
+    base = base.replace("_", " ").replace(".", " ")
+    base = _MIG_QUALITY.sub(" ", base)
+    base = re.sub(r"\s{2,}", " ", base).strip(" -")
+    return base
+
+
 def _mig_title(items):
     for it in items:
         if it["kind"] == "photo" and it["caption"].strip():
             first = it["caption"].strip().split("\n", 1)[0].strip()
             if first:
-                return first
+                return _fix_spaced(first)
     for it in items:
         if it["caption"].strip():
             first = it["caption"].strip().split("\n", 1)[0].strip()
             if first and not first.isdigit():
-                return first
+                return _fix_spaced(first)
     for it in items:
         if it["kind"] != "photo":
-            return _strip_ext(it["file_name"])
+            return _clean_file_title(it["file_name"])
     return ""
 
 
