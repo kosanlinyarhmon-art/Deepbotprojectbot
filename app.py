@@ -9,7 +9,8 @@ import unicodedata
 import time
 from datetime import datetime, timezone, timedelta
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
+                      InputMediaPhoto, InputMediaVideo)
 from telegram.error import TelegramError, InvalidToken
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler, ApplicationHandlerStop
 from telegram.helpers import create_deep_linked_url
@@ -1594,41 +1595,50 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items):
 
 async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
                           photos, videos):
-    """Copy the migrated post's media into DATABASE_CHANNEL_ID (MyDatabasechannel)."""
+    """Store photo + movie files together (one album) in DATABASE_CHANNEL_ID."""
     if not DATABASE_CHANNEL_ID:
         return False
     db_chat = int(DATABASE_CHANNEL_ID.strip())
     ok = False
     try:
-        for it in photos:
-            sent_db = await _with_flood(lambda: context.bot.send_photo(
-                chat_id=db_chat,
-                photo=it["file_id"],
-                caption=title[:1000],
+        media = []
+        if photos:
+            media.append(InputMediaPhoto(
+                photos[0]["file_id"], caption=title[:1000]))
+        for v in videos:
+            media.append(InputMediaVideo(
+                v["file_id"],
+                caption=None if media else (v.get("caption") or title)[:1000],
+                supports_streaming=True,
             ))
+        if not media:
+            return False
+        if len(media) == 1:
+            if photos:
+                await _with_flood(lambda: context.bot.send_photo(
+                    chat_id=db_chat, photo=photos[0]["file_id"],
+                    caption=title[:1000]))
+            else:
+                await _with_flood(lambda: context.bot.send_video(
+                    chat_id=db_chat, video=videos[0]["file_id"],
+                    caption=(videos[0].get("caption") or title)[:1000],
+                    supports_streaming=True))
+            return True
+
+        offset = 0
+        for i in range(0, len(media), 10):
+            chunk = media[i:i + 10]
+            sent = await _with_flood(lambda: context.bot.send_media_group(
+                chat_id=db_chat, media=chunk))
+            for j, msg in enumerate(sent):
+                vid_index = offset + j - (1 if photos else 0)
+                if 0 <= vid_index < len(videos):
+                    set_file_channel_message(
+                        payload, videos[vid_index]["file_id"], msg.message_id)
+            offset += len(chunk)
             ok = True
-            logger.info("migration DB photo saved: %s id=%s", title,
-                        sent_db.message_id)
-        for it in videos:
-            cap = (it.get("caption") or title)[:1000]
-            try:
-                sent_db = await _with_flood(lambda: context.bot.send_video(
-                    chat_id=db_chat,
-                    video=it["file_id"],
-                    caption=cap,
-                    supports_streaming=True,
-                ))
-            except TelegramError:
-                sent_db = await _with_flood(lambda: context.bot.send_document(
-                    chat_id=db_chat,
-                    document=it["file_id"],
-                    filename=it["file_name"],
-                    caption=cap,
-                ))
-            set_file_channel_message(payload, it["file_id"], sent_db.message_id)
-            ok = True
-            logger.info("migration DB video saved: %s (%s) id=%s",
-                        it["file_name"], title, sent_db.message_id)
+            await asyncio.sleep(1.5)
+        logger.info("migration DB album saved: %s (%d items)", title, len(media))
     except Exception as exc:
         logger.error("migration DB save failed (%s): %s", title, exc)
     return ok
