@@ -13,6 +13,7 @@ from flask import Flask
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       InputMediaPhoto, InputMediaVideo)
 from telegram.error import TelegramError, InvalidToken, BadRequest
+from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler, ApplicationHandlerStop, TypeHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
@@ -3351,6 +3352,11 @@ async def _repost_single_post(bot, doc, payload, files):
             reply_markup=markup)
     except Exception as exc:
         logger.warning("repost markup failed %s: %s", new_id, exc)
+        try:
+            await bot.delete_message(AUTO_PUBLISH_CHANNEL, new_id)
+        except Exception:
+            pass
+        return None
     return new_id
 
 
@@ -3366,6 +3372,7 @@ async def _repair_posts(bot, limit=25):
         "merged_into": {"$exists": False},
     }).sort("published_at", -1))
     fixed = reposted = 0
+    seen = set()
     for d in docs:
         if fixed + reposted >= limit:
             break
@@ -3376,8 +3383,14 @@ async def _repair_posts(bot, limit=25):
         if not files:
             continue
         pid = int(d["post_id"])
+        if pid in seen:
+            # item doc + series doc share one channel post: repair it once
+            continue
+        seen.add(pid)
         btn = d.get("button_id")
         album_era = bool(btn) and int(btn) != pid
+        if (btn and int(btn) == pid) or d.get("reposted_at"):
+            continue  # already a single post with buttons
 
         names = [f.get("file_name") or "" for f in files]
         marked = any(_MIG_EP_MARK.search(n) or _MIG_EP_LIST.search(n)
@@ -3445,18 +3458,8 @@ async def _repair_posts(bot, limit=25):
                     {"_id": d["_id"]}, {"$set": {"button_id": pid}})
                 fixed += 1
                 await asyncio.sleep(0.6)
-            else:
-                new_id = await _repost_single_post(bot, d, payload, files)
-                if new_id:
-                    try:
-                        await bot.delete_message(AUTO_PUBLISH_CHANNEL, pid)
-                    except Exception:
-                        pass
-                    migrated_collection.update_one(
-                        {"_id": d["_id"]},
-                        {"$set": {"post_id": new_id, "button_id": None,
-                                  "reposted_at": time.time()}})
-                    reposted += 1
+            # On any other error (timeout / album item) leave the post alone and
+            # retry on the next pass - never delete a post we could not fix.
     return fixed, reposted
 
 
@@ -4445,7 +4448,9 @@ def build_application(token):
     Handlers are (re)built per token so the bot can swap to a spare token at
     runtime without restarting the process.
     """
-    application = Application.builder().token(token).post_init(
+    application = Application.builder().token(token).request(
+        HTTPXRequest(read_timeout=30, connect_timeout=15,
+                     pool_timeout=30)).post_init(
         _epsfix_post_init).build()
 
     newpost_handler = ConversationHandler(
