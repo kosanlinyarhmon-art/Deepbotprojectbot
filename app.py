@@ -1,4 +1,5 @@
 ﻿import os
+import json
 import asyncio
 import threading
 import logging
@@ -116,6 +117,7 @@ def status():
         "threads": [t.name for t in threading.enumerate()],
         "mongo": "?",
         "forwarder": {},
+        "cleanup": (db["config"].find_one({"_id": "cleanup"}) or {}),
         "logs": logs,
     }
     try:
@@ -3463,6 +3465,58 @@ async def _repair_posts(bot, limit=25):
     return fixed, reposted
 
 
+async def _cleanup_once(bot):
+    """Delete duplicate channel posts listed in cleanup_ids.json (exactly once).
+
+    The Bot API cannot read channel history, so the duplicate list ships with
+    the code. ``keep`` maps the surviving post id -> duplicate ids to delete.
+    Mongo docs that point at a deleted post are re-pointed to the keeper so the
+    repair/dedupe passes keep working.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "cleanup_ids.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        logger.warning("cleanup file unreadable: %s", exc)
+        return
+    version = int(data.get("version") or 0)
+    if not version:
+        return
+    cfg = db["config"].find_one({"_id": "cleanup"}) or {}
+    if int(cfg.get("version") or 0) >= version:
+        return
+    keep_map = {}
+    for keep_id, olds in (data.get("keep") or {}).items():
+        keep_map[int(keep_id)] = [int(x) for x in olds]
+    deleted = failed = 0
+    for keep_id, olds in keep_map.items():
+        for pid in olds:
+            try:
+                await bot.delete_message(AUTO_PUBLISH_CHANNEL, pid)
+                deleted += 1
+            except Exception as exc:
+                failed += 1
+                logger.info("cleanup skip %s: %s", pid, exc)
+            await asyncio.sleep(0.5)
+        migrated_collection.update_many(
+            {"post_id": {"$in": olds}},
+            {"$set": {"post_id": keep_id, "button_id": keep_id}})
+        migrated_collection.update_many(
+            {"button_id": {"$in": olds}}, {"$set": {"button_id": keep_id}})
+        migrated_collection.update_many(
+            {"merged_into": {"$in": [f"post:{x}" for x in olds]}},
+            {"$set": {"merged_into": f"post:{keep_id}"}})
+    db["config"].update_one(
+        {"_id": "cleanup"},
+        {"$set": {"version": version, "deleted": deleted,
+                  "failed": failed, "at": time.time()}}, upsert=True)
+    logger.info("cleanup v%d: deleted=%d failed=%d", version, deleted, failed)
+
+
 async def _dedupe_reposts(bot, hours=8):
     """Clean up the duplicate copies made while API calls were timing out.
 
@@ -3540,7 +3594,12 @@ async def _dedupe_reposts(bot, hours=8):
 
 async def _repair_once(bot):
     """Clean up the whole backlog right after a deploy, in small batches."""
-    await asyncio.sleep(90)
+    await asyncio.sleep(40)
+    try:
+        await _cleanup_once(bot)
+    except Exception as exc:
+        logger.warning("cleanup once failed: %s", exc)
+    await asyncio.sleep(45)
     try:
         await _dedupe_reposts(bot)
     except Exception as exc:
