@@ -1967,6 +1967,78 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
         await _mig_publish_locked(context, key, items, series_key, src)
 
 
+async def _mig_post_album(context: ContextTypes.DEFAULT_TYPE, photos, videos,
+                          caption, reply_markup, chat_id=None):
+    """Publish one channel post with EVERY file of the release.
+
+    * 0-1 video -> normal photo/video post, buttons attached inline.
+    * 2+ videos -> Telegram album (poster + all episodes). Albums cannot carry
+      inline buttons, so the buttons go on a small message right under it.
+    Returns (post_id, button_id).
+    """
+    chat_id = chat_id or AUTO_PUBLISH_CHANNEL
+    if not chat_id:
+        return None, None
+    if not photos and not videos:
+        return None, None
+
+    if len(videos) <= 1:
+        try:
+            if photos:
+                sent = await _with_flood(lambda: context.bot.send_photo(
+                    chat_id=chat_id, photo=photos[0]["file_id"],
+                    caption=caption, reply_markup=reply_markup))
+            else:
+                sent = await _with_flood(lambda: context.bot.send_video(
+                    chat_id=chat_id, video=videos[0]["file_id"],
+                    caption=caption, reply_markup=reply_markup,
+                    supports_streaming=True))
+        except Exception as exc:
+            logger.error("post single media failed: %s", exc)
+            return None, None
+        return (sent.message_id if sent else None), None
+
+    media = []
+    if photos:
+        media.append(InputMediaPhoto(photos[0]["file_id"], caption=caption))
+    for v in videos:
+        media.append(InputMediaVideo(
+            v["file_id"],
+            caption=None if media else caption,
+            supports_streaming=True))
+
+    sent_msgs = []
+    for i in range(0, len(media), 10):
+        chunk = media[i:i + 10]
+        try:
+            res = await _with_flood(
+                lambda: context.bot.send_media_group(chat_id=chat_id,
+                                                     media=chunk))
+            sent_msgs.extend(res or [])
+        except Exception as exc:
+            logger.error("album send failed (%d items): %s", len(chunk), exc)
+            break
+        await asyncio.sleep(1.2)
+
+    if not sent_msgs:
+        return None, None
+
+    post_id = sent_msgs[0].message_id
+    button_id = None
+    if reply_markup:
+        try:
+            btn = await context.bot.send_message(
+                chat_id=chat_id,
+                text="🎬 ဒီဇာတ်ကားကို ရယူရန် 👇",
+                reply_markup=reply_markup,
+                reply_to_message_id=post_id,
+            )
+            button_id = btn.message_id
+        except Exception as exc:
+            logger.warning("album button message failed: %s", exc)
+    return post_id, button_id
+
+
 def _mig_db_caption(title, seasons, ep=None, eps=None):
     """Caption used for a file stored in the database channel."""
     line = _mig_eps_line(seasons or (),
@@ -2123,21 +2195,33 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
              "$set": {"db_saved": True,
                       "db_post_id": db_post_id or sdoc.get("db_post_id")}},
         )
-    # show the new season / episode numbers on the one shared series post
+    # rebuild the one shared series post so EVERY episode is visible in it
     post_id = sdoc.get("post_id")
-    caption = sdoc.get("caption") or ""
-    if post_id and (new_seasons or new_eps):
-        caption = _mig_build_caption(title, synopsis, seasons, eps)
-        try:
-            await context.bot.edit_message_caption(
-                chat_id=AUTO_PUBLISH_CHANNEL,
-                message_id=int(post_id),
-                caption=caption,
-            )
-        except Exception as exc:
-            logger.warning("series caption update failed (%s): %s", title, exc)
-    if not caption:
-        caption = _mig_build_caption(title, synopsis, seasons, eps)
+    button_id = sdoc.get("button_id")
+    caption = _mig_build_caption(title, synopsis, seasons, eps)
+    all_files = get_file_info(payload) or [] if payload else []
+    all_videos = [{"file_id": f.get("file_id"),
+                   "file_name": f.get("file_name")} for f in all_files
+                  if f.get("file_id")]
+    if payload and all_videos:
+        deep_link = create_deep_linked_url(context.bot.username, payload)
+        new_post, new_btn = await _mig_post_album(
+            context, [photo] if photo else [], all_videos, caption,
+            _mig_keyboard(deep_link))
+        if new_post:
+            for old in (post_id, button_id):
+                if old:
+                    try:
+                        await context.bot.delete_message(
+                            AUTO_PUBLISH_CHANNEL, int(old))
+                    except Exception:
+                        pass
+            post_id, button_id = new_post, new_btn
+            migrated_collection.update_one(
+                {"_id": sdoc["_id"]},
+                {"$set": {"post_id": post_id, "button_id": button_id}})
+            logger.info("series post rebuilt: %s (%d files)",
+                        title, len(all_videos))
 
     migrated_collection.update_one(
         {"_id": sdoc["_id"]},
@@ -2205,24 +2289,10 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
         caption += f"\n\n{header}\n\n{synopsis}"
     caption = append_upload_credit(caption, max_len=1024)
 
-    sent = None
-    if photos:
-        sent = await _with_flood(lambda: context.bot.send_photo(
-            chat_id=AUTO_PUBLISH_CHANNEL,
-            photo=photos[0]["file_id"],
-            caption=caption,
-            reply_markup=reply_markup,
-        ))
-    elif videos:
-        sent = await _with_flood(lambda: context.bot.send_video(
-            chat_id=AUTO_PUBLISH_CHANNEL,
-            video=videos[0]["file_id"],
-            caption=caption,
-            reply_markup=reply_markup,
-            supports_streaming=True,
-        ))
+    post_id, button_id = await _mig_post_album(
+        context, photos, videos, caption, reply_markup)
 
-    if sent is None:
+    if post_id is None:
         logger.info("migration skipped (no media): %s", title)
         migrated_collection.update_one(
             {"_id": key},
@@ -2233,7 +2303,7 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
 
     logger.info(
         "migration published '%s' (%d media) -> %s id=%s",
-        title, len(items), AUTO_PUBLISH_CHANNEL, sent.message_id,
+        title, len(items), AUTO_PUBLISH_CHANNEL, post_id,
     )
     db_ok, db_post_id = await _mig_save_to_db(
         context, payload, title, photos, videos, seasons, eps)
@@ -2242,7 +2312,8 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
         {"$set": {
             "done": True,
             "title": title,
-            "post_id": sent.message_id,
+            "post_id": post_id,
+            "button_id": button_id,
             "payload": payload,
             "db_saved": bool(db_ok),
             "db_post_id": db_post_id,
@@ -2260,7 +2331,8 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
                 "source": src,
                 "series_key": series_key,
                 "title": title,
-                "post_id": sent.message_id,
+                "post_id": post_id,
+                "button_id": button_id,
                 "payload": payload,
                 "db_saved": bool(db_ok),
                 "episodes": len(videos),
