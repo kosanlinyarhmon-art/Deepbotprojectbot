@@ -12,7 +12,7 @@ from flask import Flask
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       InputMediaPhoto, InputMediaVideo)
 from telegram.error import TelegramError, InvalidToken
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler, ApplicationHandlerStop
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters, CallbackQueryHandler, ChatMemberHandler, ApplicationHandlerStop, TypeHandler
 from telegram.helpers import create_deep_linked_url
 from pymongo import MongoClient
 from telegraph import Telegraph
@@ -35,6 +35,75 @@ def home():
 @app.route('/health')
 def health():
     return "OK", 200
+
+
+# ---------- Live status (heartbeat) ----------
+BOOT_TS = time.time()
+LIVE = {
+    "updates": 0,
+    "last_update": 0.0,
+    "last_update_kind": "",
+    "polling": False,
+    "label": "",
+    "last_error": "",
+    "merge_last": "",
+}
+
+
+def _hb(update, context):
+    """Middleware-style counter so /status can prove polling is alive."""
+    LIVE["updates"] += 1
+    LIVE["last_update"] = time.time()
+    try:
+        LIVE["last_update_kind"] = (
+            "message" if update.message else
+            "callback" if update.callback_query else
+            "member" if update.chat_member else "other")
+    except Exception:
+        pass
+    return None
+
+
+@app.route('/status')
+def status():
+    from flask import jsonify
+    now = time.time()
+    out = {
+        "ok": True,
+        "uptime_sec": int(now - BOOT_TS),
+        "pid": os.getpid(),
+        "polling": LIVE["polling"],
+        "bot_label": LIVE["label"],
+        "updates": LIVE["updates"],
+        "last_update_age_sec": (int(now - LIVE["last_update"])
+                                if LIVE["last_update"] else None),
+        "last_update_kind": LIVE["last_update_kind"],
+        "last_error": LIVE["last_error"],
+        "merge_last": LIVE["merge_last"],
+        "mongo": "?",
+        "forwarder": {},
+    }
+    try:
+        db.command("ping")
+        out["mongo"] = "ok"
+    except Exception as exc:
+        out["mongo"] = f"ERR {exc}"
+    try:
+        import cloud_forwarder as cf
+        cfg = cf.config()
+        out["forwarder"] = {
+            "enabled": bool(cfg.get("enabled")),
+            "session_set": bool((cfg.get("session") or "").strip()),
+            "thread_alive": bool(cf._task and cf._task.is_alive()),
+            "client_connected": bool(cf._client),
+            "stop_flag": bool(cf._stop),
+            "last_log": getattr(cf, "LAST_LOG", ""),
+            "last_log_age_sec": (int(now - cf.LAST_LOG_TS)
+                                 if getattr(cf, "LAST_LOG_TS", 0) else None),
+        }
+    except Exception as exc:
+        out["forwarder"] = {"error": str(exc)}
+    return jsonify(out)
 
 # ---------- MongoDB Connection ----------
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -2564,6 +2633,38 @@ async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "▶️ Cloud forwarder ၃၅ စက္ကန့်အတွင်း စတင်ပါမယ်။")
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Live health: is polling alive, when was the last update, forwarder."""
+    if not is_admin(update.effective_user.id):
+        return
+    now = time.time()
+    lines = [
+        "🩺 BOT STATUS",
+        f"uptime: {int((now - BOOT_TS) // 60)} min",
+        f"polling: {'ON' if LIVE['polling'] else 'OFF'}  ({LIVE['label']})",
+        f"updates: {LIVE['updates']}",
+    ]
+    if LIVE["last_update"]:
+        lines.append(f"last update: {int(now - LIVE['last_update'])}s ago"
+                     f" ({LIVE['last_update_kind']})")
+    else:
+        lines.append("last update: none since restart")
+    if LIVE["last_error"]:
+        lines.append(f"last error: {LIVE['last_error'][:200]}")
+    try:
+        import cloud_forwarder as cf
+        cfg = cf.config()
+        fwd_on = "ON" if cfg.get("enabled") else "OFF"
+        thr = "alive" if (cf._task and cf._task.is_alive()) else "dead"
+        cli = "yes" if cf._client else "no"
+        lines.append(f"forwarder: {fwd_on} thread={thr} client={cli}")
+        if getattr(cf, "LAST_LOG", ""):
+            lines.append(f"last: {cf.LAST_LOG[:200]}")
+    except Exception as exc:
+        lines.append(f"forwarder: ERR {exc}")
+    await update.message.reply_text("\n".join(lines)[:3900])
+
+
 async def migstat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Per-source migration counts + highest source message id already used."""
     if not is_admin(update.effective_user.id):
@@ -3031,6 +3132,21 @@ async def _seriesmerge_loop(bot):
 async def _epsfix_post_init(application):
     """Run the one-time repair after a deploy."""
     try:
+        # Tell the admin the bot is alive again (at most once every 10 min so a
+        # crash/restart loop cannot spam).
+        try:
+            last = db["config"].find_one({"_id": "boot_notice"}) or {}
+            if time.time() - float(last.get("ts") or 0) > 600:
+                db["config"].update_one({"_id": "boot_notice"},
+                                        {"$set": {"ts": time.time()}},
+                                        upsert=True)
+                admin = int((db["config"].find_one(
+                    {"_id": "forwarder"}) or {}).get("admin_chat") or 1147922719)
+                await application.bot.send_message(
+                    admin,
+                    "♻️ Bot ပြန်တက်ပြီးပါပြီ။ /status နဲ့ စစ်လို့ရပါတယ်။")
+        except Exception as exc:
+            logger.warning("boot notice failed: %s", exc)
         application.create_task(_seriesmerge_loop(application.bot))
         if db["config"].find_one({"_id": "backfill2_once"}):
             return
@@ -3998,6 +4114,7 @@ def build_application(token):
     application.add_handler(CommandHandler("forwardstop", forwardstop_command))
     application.add_handler(CommandHandler("forwardstate", forwardstate_command))
     application.add_handler(CommandHandler("migstat", migstat_command))
+    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("linkcheck", linkcheck_command))
     application.add_handler(CommandHandler("fixempty", fixempty_command))
     application.add_handler(CommandHandler("epfix", epfix_command))
@@ -4026,6 +4143,8 @@ def build_application(token):
     application.add_handler(CommandHandler("relinkdb", relinkdb_command))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
     application.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+    # heartbeat: group -99 runs before everything, just counts traffic
+    application.add_handler(TypeHandler(Update, _hb), group=-99)
     return application
 
 
@@ -4101,22 +4220,49 @@ def run_bot():
 
     if len(pairs) == 1:
         token, _username = pairs[0]
-        app = build_application(token)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(set_commands(app))
-        loop.run_until_complete(_log_notify_channel_status(app.bot))
-        logger.info("Starting bot polling...")
-        # drop_pending_updates: never replay stale queued updates after a
-        # restart, otherwise old forwarded movies get reposted/redelivered.
-        # allowed_updates MUST include chat_member or Telegram never sends
-        # the channel join/leave notifications (PTB takes it here, not on
-        # the builder).
-        app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-        )
-        logger.info("Bot polling stopped normally.")
+        LIVE["label"] = f"@{_username or '?'}"
+        # Self-healing poll loop: a 409 Conflict (two instances / leftover
+        # webhook) or a network blip must never leave the process alive with a
+        # dead bot. Clear the webhook, retry with backoff, log every failure.
+        attempt = 0
+        while True:
+            attempt += 1
+            app = build_application(token)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(set_commands(app))
+                loop.run_until_complete(_log_notify_channel_status(app.bot))
+                # A webhook left over from any earlier setup makes getUpdates
+                # fail with 409 for ever; drop it before polling.
+                loop.run_until_complete(
+                    app.bot.delete_webhook(drop_pending_updates=True))
+                LIVE["polling"] = True
+                LIVE["last_error"] = ""
+                logger.info("Starting bot polling... (attempt %d)", attempt)
+                # drop_pending_updates: never replay stale queued updates after
+                # a restart, otherwise old forwarded movies get reposted.
+                app.run_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True,
+                )
+                logger.info("Bot polling stopped normally.")
+                LIVE["polling"] = False
+                if attempt >= 3:
+                    break
+            except InvalidToken:
+                LIVE["polling"] = False
+                LIVE["last_error"] = "InvalidToken"
+                logger.error("TELEGRAM_TOKEN is invalid - cannot poll.")
+                break
+            except Exception as exc:
+                LIVE["polling"] = False
+                LIVE["last_error"] = f"{type(exc).__name__}: {exc}"
+                logger.exception("Bot polling crashed (%s). Retrying in 15s",
+                                 exc)
+                time.sleep(15)
+                continue
+            time.sleep(5)
         return
 
     logger.info("Running %d bots SIMULTANEOUSLY.", len(pairs))

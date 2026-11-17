@@ -43,6 +43,8 @@ DEFAULT_SOURCES = [
 _client = None
 _task = None
 _stop = False
+LAST_LOG = ""
+LAST_LOG_TS = 0.0
 
 
 def _db():
@@ -71,6 +73,8 @@ def state_col():
 def log(msg):
     line = time.strftime("%H:%M:%S") + " " + msg
     logger.info("[forwarder] %s", msg)
+    global LAST_LOG, LAST_LOG_TS
+    LAST_LOG, LAST_LOG_TS = msg[:300], time.time()
     try:
         _db()["forward_log"].insert_one({"ts": time.time(), "msg": msg[:500]})
     except Exception:
