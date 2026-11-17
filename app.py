@@ -1390,7 +1390,23 @@ _MIG_JUNK = (
     re.compile(r"upload(?:ed)?\s*by", re.I),
     re.compile(r"copyright\s*disclaimer|no copyright infringement", re.I),
     re.compile(r"\bjoin\b", re.I),
+    re.compile(r"\bfollow\s+(?:us|our|me)\b|\bsubscribe\b", re.I),
+    re.compile(r"\bpowered\s*by\b|\bcontact\s+us\b", re.I),
 )
+# credit fragments that can sit inside a title line: "Savi (2024) (mmsub)Crd"
+_MIG_JUNK_STRIP = re.compile(
+    r"(?:"
+    r"\bcrd\b|\bcredits?\b|"
+    r"\bmmsub\b|\bmm\s*sub\b|"
+    r"upload(?:ed)?\s*by\b[^|,\n]*|"
+    r"\bsub(?:title)?s?\s*by\b[^|,\n]*|"
+    r"\bencoded?\s*by\b[^|,\n]*|"
+    r"\bencod(?:e|ed|er|ing)\b"
+    r")", re.I)
+_MIG_EMPTY_BRACKETS = re.compile(r"[\(\[\{]\s*[\)\]\}]")
+_MIG_LABEL_ONLY = re.compile(
+    r"(?i)(?:download|downloads|watch|watch\s*now|link|links|"
+    r"movie\s*link|telegram|join|ဒေါင်းလုဒ်|လင့်|လင့်ခ်)\s*[:\-]?\s*")
 _MIG_URL = re.compile(
     r"(?:https?://|www\.|t\.me/|telegram\.me/|telegram\.dog/|tg://)\S*", re.I)
 _MIG_SYMBOLS = re.compile(r"^[\W_]+$", re.UNICODE)
@@ -1482,12 +1498,17 @@ def clean_migrate_caption(text):
         return ""
     keep = []
     for ln in text.replace("\r", "").split("\n"):
+        ln = _MIG_JUNK_STRIP.sub(" ", ln)
+        ln = _MIG_EMPTY_BRACKETS.sub(" ", ln)
+        ln = re.sub(r"\s{2,}", " ", ln).strip(" |-,:;·•")
         if any(p.search(ln) for p in _MIG_JUNK):
             continue
         stripped = _MIG_URL.sub("", ln).strip()
         if not stripped:
             if keep and keep[-1] != "":
                 keep.append("")
+            continue
+        if _MIG_LABEL_ONLY.fullmatch(stripped):
             continue
         if _MIG_SYMBOLS.match(stripped):
             continue
@@ -1774,8 +1795,7 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
     caption = title
     if synopsis:
         caption += f"\n\n{header}\n\n{synopsis}"
-    if len(caption) > 1024:
-        caption = caption[:1020].rstrip() + "..."
+    caption = append_upload_credit(caption, max_len=1024)
 
     sent = None
     if photos:
