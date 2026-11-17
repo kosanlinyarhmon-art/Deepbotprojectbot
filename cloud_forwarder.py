@@ -45,6 +45,7 @@ _task = None
 _stop = False
 LAST_LOG = ""
 LAST_LOG_TS = 0.0
+_NOTIFY_SEEN = {}
 
 
 def _db():
@@ -87,6 +88,14 @@ def notify(text):
     token = os.environ.get("TELEGRAM_TOKEN", "")
     if not token:
         return
+    # Watch mode re-scans every few minutes: never repeat the same note.
+    now = time.time()
+    for k, ts in list(_NOTIFY_SEEN.items()):
+        if now - ts > 1800:
+            _NOTIFY_SEEN.pop(k, None)
+    if text in _NOTIFY_SEEN:
+        return
+    _NOTIFY_SEEN[text] = now
     chat = str(config().get("admin_chat") or 1147922719)
     data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
     try:
@@ -117,7 +126,8 @@ async def drain(sent, started, per_item):
         await asyncio.sleep(min(60, max(5, remain)))
 
 
-async def forward_channel(client, bot, raw_source, per_item, min_delay):
+async def forward_channel(client, bot, raw_source, per_item, min_delay,
+                          watch=False):
     source_id = to_entity_id(raw_source)
     try:
         source = await client.get_entity(source_id)
@@ -128,7 +138,7 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay):
     key = str(source_id)
     st = state_col().find_one({"_id": key}) or {"_id": key, "last_id": 0}
     last_id = int(st.get("last_id") or 0)
-    if st.get("done"):
+    if st.get("done") and not watch:
         log(f"== SKIP {title} (already finished)")
         return
     log(f"== START {title} ({source_id}) resume from id > {last_id}")
@@ -194,12 +204,18 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay):
     if not _stop:
         log(f"== FORWARDED ALL {title} ({sent} msgs) - draining")
         await drain(sent, chan_started, per_item)
-        state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
+        if watch:
+            state_col().update_one(
+                {"_id": key},
+                {"$set": {"last_scan": time.time()}, "$unset": {"done": ""}},
+                upsert=True)
+        else:
+            state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
         log(f"== DONE {title}")
         notify(f"✅ ပြီးသွားပြီ: {title} ({sent} msg)")
 
 
-async def forward_hub(client, bot, raw_hub, per_item, min_delay):
+async def forward_hub(client, bot, raw_hub, per_item, min_delay, watch=False):
     """Link-hub channel: join the channels it links to, forward the movies the
     links point at, then leave again (only channels we joined ourselves)."""
     hub_id = to_entity_id(raw_hub)
@@ -212,7 +228,7 @@ async def forward_hub(client, bot, raw_hub, per_item, min_delay):
     key = str(hub_id)
     st = state_col().find_one({"_id": key}) or {"_id": key, "last_id": 0}
     last_id = int(st.get("last_id") or 0)
-    if st.get("done"):
+    if st.get("done") and not watch:
         log(f"== SKIP hub {title} (already finished)")
         return
     log(f"== START hub {title} ({hub_id}) from id > {last_id}")
@@ -310,7 +326,13 @@ async def forward_hub(client, bot, raw_hub, per_item, min_delay):
             joined.discard(ch_id)
 
     if not _stop:
-        state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
+        if watch:
+            state_col().update_one(
+                {"_id": key},
+                {"$set": {"last_scan": time.time()}, "$unset": {"done": ""}},
+                upsert=True)
+        else:
+            state_col().update_one({"_id": key}, {"$set": {"done": 1}}, upsert=True)
         log(f"== DONE hub {title} ({sent} msgs)")
         notify(f"✅ Hub ပြီးသွားပြီ: {title} ({sent} msg)")
 
@@ -341,6 +363,7 @@ async def _run():
     sources = cfg.get("sources") or DEFAULT_SOURCES
     per_item = float(cfg.get("per_item") or 3.8)
     min_delay = float(cfg.get("min_delay") or 2)
+    watch = bool(cfg.get("watch", True))
 
     client = TelegramClient(StringSession(session), API_ID, API_HASH)
     _client = client
@@ -353,27 +376,33 @@ async def _run():
     log(f"userbot: {me.first_name} ({me.id})")
     bot = await client.get_entity(TARGET_BOT)
     log(f"target bot: {getattr(bot, 'username', TARGET_BOT)} ({bot.id})")
-    try:
-        await client.send_message(bot, "/start")
-        await asyncio.sleep(2)
-    except Exception as exc:
-        log(f"warning: /start failed: {exc}")
+    if not cfg.get("watching"):
+        try:
+            await client.send_message(bot, "/start")
+            await asyncio.sleep(2)
+        except Exception as exc:
+            log(f"warning: /start failed: {exc}")
 
     # link hubs first: they are short and unlock the newest series quickly
     hubs = cfg.get("hubs") or DEFAULT_HUBS
     for hub in hubs:
         if _stop:
             break
-        await forward_hub(client, bot, hub, per_item, min_delay)
+        await forward_hub(client, bot, hub, per_item, min_delay, watch)
 
     for src in sources:
         if _stop:
             break
-        await forward_channel(client, bot, src, per_item, min_delay)
+        await forward_channel(client, bot, src, per_item, min_delay, watch)
 
     if not _stop:
-        log("all channels finished")
-        set_config(enabled=False, finished_at=time.time())
+        if watch:
+            # 24/7 mode: stay connected and keep checking for new posts.
+            log("scan finished - watching for new posts")
+            set_config(enabled=True, watching=True, last_scan=time.time())
+        else:
+            log("all channels finished")
+            set_config(enabled=False, finished_at=time.time())
     await client.disconnect()
     _client = None
 
@@ -387,19 +416,30 @@ def main_thread():
             asyncio.run(_run())
         except Exception as exc:
             logger.exception("forwarder crashed: %s", exc)
-        if _stop or not config().get("enabled"):
+        cfg = config()
+        if _stop or not cfg.get("enabled"):
             return
-        time.sleep(30)
+        if cfg.get("watch", True):
+            interval = int(cfg.get("watch_interval") or 300)
+            log(f"idle {interval}s, then scan again")
+            time.sleep(interval)
+        else:
+            time.sleep(30)
 
 
 def start_in_background():
-    """Start the forwarder thread if it is enabled and not already running."""
+    """Start the forwarder thread if it should run and is not running yet."""
     global _task
     import threading
     if _task and _task.is_alive():
         return False
-    if not config().get("enabled"):
+    cfg = config()
+    if not (cfg.get("enabled") or cfg.get("watch", True)):
         return False
+    if not (cfg.get("session") or "").strip():
+        return False
+    if not cfg.get("enabled"):
+        set_config(enabled=True)
     _task = threading.Thread(target=main_thread, daemon=True)
     _task.start()
     return True

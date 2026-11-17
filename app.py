@@ -70,6 +70,7 @@ LIVE = {
     "last_error": "",
     "merge_last": "",
     "loops": 0,
+    "bots": {},
 }
 
 
@@ -84,6 +85,13 @@ def _hb(update, context):
             "member" if update.chat_member else "other")
     except Exception:
         pass
+    try:
+        b = LIVE["bots"].get(str(context.bot.id))
+        if b is not None:
+            b["updates"] = b.get("updates", 0) + 1
+            b["last_update"] = LIVE["last_update"]
+    except Exception:
+        pass
     return None
 
 
@@ -91,6 +99,8 @@ def _hb(update, context):
 def status():
     from flask import jsonify
     now = time.time()
+    mask = re.compile(r"(bot\d{6,}:)[A-Za-z0-9_-]{30,}")
+    logs = [mask.sub(r"\1***", ln) for ln in list(RING.buf)[-40:]]
     out = {
         "ok": True,
         "uptime_sec": int(now - BOOT_TS),
@@ -104,10 +114,11 @@ def status():
         "last_error": LIVE["last_error"],
         "merge_last": LIVE["merge_last"],
         "polling_loops": LIVE["loops"],
+        "bots": LIVE["bots"],
         "threads": [t.name for t in threading.enumerate()],
         "mongo": "?",
         "forwarder": {},
-        "logs": list(RING.buf)[-40:],
+        "logs": logs,
     }
     try:
         db.command("ping")
@@ -2627,7 +2638,7 @@ async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("⚠️ /setsession <string> အရင်လုပ်ပါ။")
         return
     args = context.args or []
-    cloud_forwarder.set_config(enabled=True)
+    cloud_forwarder.set_config(enabled=True, watch=True)
     # /forwardstart <channel_id> <last_id>  -> reset one channel
     # /forwardstart <last_id>              -> reset the first channel
     if len(args) >= 2 and args[0].lstrip("-").isdigit() and args[1].isdigit():
@@ -3193,7 +3204,7 @@ async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as exc:
         await update.message.reply_text(f"⚠️ {exc}")
         return
-    cloud_forwarder.set_config(enabled=False)
+    cloud_forwarder.set_config(enabled=False, watch=False)
     cloud_forwarder.stop()
     await update.message.reply_text("⏹️ Cloud forwarder ရပ်နေပါပြီ။")
 
@@ -3211,6 +3222,8 @@ async def forwardstate_command(update: Update, context: ContextTypes.DEFAULT_TYP
     lines = [
         "🚚 Cloud forwarder",
         f"enabled: {bool(cfg.get('enabled'))}",
+        f"watch (24/7): {bool(cfg.get('watch', True))}",
+        f"last scan: {int((time.time() - float(cfg.get('last_scan') or 0)) // 60) if cfg.get('last_scan') else '-'} min ago",
         f"session: {'set' if cfg.get('session') else 'missing'}",
     ]
     for r in rows:
@@ -4187,7 +4200,15 @@ def _bot_prepare(app, label, loop):
     async def _prepare():
         # Raises InvalidToken for a dead token so the caller can give up on this
         # bot instead of retrying forever.
-        await app.bot.get_me()
+        me = await app.bot.get_me()
+        LIVE["bots"][str(me.id)] = {
+            "username": me.username,
+            "label": label,
+            "polling": True,
+            "updates": 0,
+            "last_update": 0.0,
+            "last_error": "",
+        }
         try:
             await set_commands(app)
         except Exception as e:
