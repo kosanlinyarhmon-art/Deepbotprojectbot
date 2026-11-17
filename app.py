@@ -1436,8 +1436,9 @@ _MIG_URL = re.compile(
 _MIG_SYMBOLS = re.compile(r"^[\W_]+$", re.UNICODE)
 _MIG_SPACED = re.compile(r"\b(?:[A-Za-z][._\-]){2,}[A-Za-z]\b")
 _MIG_QUALITY = re.compile(
-    r"\b(?:2160p|1440p|1080p|720p|480p|360p|web[- ]?dl|webrip|web|bluray|"
-    r"hevc|h\.?264|h\.?265|x264|x265|aac|nf|amzn|dsnp|hmax|k2|hevcmp4)\b",
+    r"\b(?:2160p|1440p|1080p|720p|480p|360p|4k|web[- ]?dl|webrip|web|bluray|"
+    r"brrip|hdtv|hevc|h\.?264|h\.?265|x264|x265|aac|ddp\d?|dts|10bit|hdr|"
+    r"nf|amzn|dsnp|hmax|k2|hevcmp4)\b",
     re.I,
 )
 
@@ -1453,9 +1454,10 @@ MIG_MAX_WAIT = 45.0
 _MIG_EP_MARK = re.compile(
     r"(?:"
     r"\bs\s*\d{1,2}\s*[-_. ]?\s*e\s*p?\s*\d{1,3}\b"
-    r"|\bep\s*[-_. ]?\s*\d{1,4}\b"
-    r"|\bepisode\s*[-_. ]?\s*\d{1,4}\b"
-    r"|\bseason\s*[-_. ]?\s*\d{1,2}\b"
+    r"|\bs\s*\d{1,2}\b"
+    r"|\bep\s*[\[\(]?\s*\d{1,4}\b"
+    r"|\bepisode\s*[\[\(]?\s*\d{1,4}\b"
+    r"|\bseason\s*[\[\(]?\s*\d{1,2}\b"
     r"|\be\s*\d{1,3}\b"
     r")", re.I)
 _MIG_EP_NOISE = re.compile(
@@ -1483,8 +1485,9 @@ def _mig_series_key(item):
     Episodes of one series share this key, so they end up on ONE post with ONE
     deep link.  A different title/caption gives a different key -> new post.
     """
-    title = _mig_item_title(item)
+    title = _mig_clean_title(_mig_item_title(item))
     base = clean_migrate_caption(_mig_series_base(title))
+    base = re.sub(r"\s+\d{1,2}$", "", base)  # trailing part number
     if not base:
         return ""
     if not _MIG_QUALITY.sub("", base).strip():
@@ -1524,15 +1527,23 @@ def _mig_expand_nums(first, tail):
 
 
 def _mig_eps_info(items):
-    """Season / episode numbers written in the source caption or file name."""
-    seasons, eps = set(), set()
-    for it in items:
-        raw = f"{it.get('caption') or ''} {it.get('file_name') or ''}"
-        for first, tail in _MIG_SEASON_GET.findall(raw):
-            seasons.update(_mig_expand_nums(first, tail))
-        for first, tail in _MIG_EP_GET.findall(raw):
-            eps.update(_mig_expand_nums(first, tail))
-    return seasons, eps
+    """Season / episode numbers written in the source caption or file name.
+
+    Captions win over file names: a caption saying "EP[4]" is the real episode
+    even when the file is named S01E08.
+    """
+    def scan(texts):
+        s, e = set(), set()
+        for raw in texts:
+            for first, tail in _MIG_SEASON_GET.findall(raw):
+                s.update(_mig_expand_nums(first, tail))
+            for first, tail in _MIG_EP_GET.findall(raw):
+                e.update(_mig_expand_nums(first, tail))
+        return s, e
+
+    cs, ce = scan([it.get("caption") or "" for it in items])
+    ns, ne = scan([it.get("file_name") or "" for it in items])
+    return (cs or ns), (ce or ne)
 
 
 def _mig_eps_fill(seasons, eps, videos, sdoc=None):
@@ -1720,21 +1731,69 @@ def _clean_file_title(name):
     return base
 
 
+_MIG_TITLE_JUNK = re.compile(r"[\s,._-]*\bCM\b[\s,._-]*$")
+_MIG_TITLE_FILE = re.compile(
+    r"(?i)(?:\.(?:mp4|mkv|avi|mov|wmv|flv|ts|m4v|webm|srt)\s*$"
+    r"|\b(?:1080p|720p|480p|2160p|4k|web-?dl|webrip|bluray|brrip|hdtv|"
+    r"x264|x265|h\.?264|h\.?265|hevc|aac|ddp\d?|dts|10bit|hdr)\b)")
+
+
+def _mig_clean_title(t):
+    t = (t or "").strip()
+    if _MIG_TITLE_FILE.search(t):
+        t = _clean_file_title(t)
+    t = _MIG_TITLE_JUNK.sub("", t)
+    t = re.sub(r"\s{2,}", " ", t).strip(" ,.-_")
+    return t
+
+
+def _mig_good_title(raw):
+    """A usable title: not a bare number, not only 'Ep 1' / 'Season 2'."""
+    t = _mig_clean_title(_fix_spaced((raw or "").strip()))
+    if not t or t.isdigit():
+        return ""
+    base = _MIG_EP_LIST.sub(" ", t)
+    base = _MIG_EP_MARK.sub(" ", base)
+    base = _MIG_EP_NOISE.sub(" ", base)
+    if len(re.sub(r"[^A-Za-z\u1000-\u109f]+", "", base)) < 3:
+        return ""
+    return t
+
+
 def _mig_title(items):
-    for it in items:
-        if it["kind"] == "photo" and it["caption"].strip():
-            first = it["caption"].strip().split("\n", 1)[0].strip()
-            if first:
-                return _fix_spaced(first)
-    for it in items:
-        if it["caption"].strip():
-            first = it["caption"].strip().split("\n", 1)[0].strip()
-            if first and not first.isdigit():
-                return _fix_spaced(first)
+    for want_photo in (True, False):
+        for it in items:
+            if want_photo and it["kind"] != "photo":
+                continue
+            cap = it["caption"].strip()
+            if not cap:
+                continue
+            t = _mig_good_title(cap.split("\n", 1)[0])
+            if t:
+                return t
     for it in items:
         if it["kind"] != "photo":
-            return _clean_file_title(it["file_name"])
+            t = _mig_good_title(_clean_file_title(it["file_name"]))
+            if t:
+                return t
+    for it in items:
+        t = _mig_good_title(_clean_file_title(it["file_name"]))
+        if t:
+            return t
     return ""
+
+
+def _mig_syn_ok(out, title):
+    """False when a 'synopsis' only repeats the title / episode markers."""
+    if not out or _MIG_TITLE_FILE.search(out):
+        return False
+    plain = _MIG_EP_MARK.sub(" ", out)
+    plain = _MIG_EP_LIST.sub(" ", plain)
+    plain = _MIG_EP_NOISE.sub(" ", plain)
+    plain = re.sub(r"[^0-9a-z\u1000-\u109f]+", " ", plain.lower()).split()
+    ttoks = set(re.sub(r"[^0-9a-z\u1000-\u109f]+", " ",
+                       (title or "").lower()).split())
+    return bool(plain) and not set(plain) <= ttoks
 
 
 def _mig_synopsis(items, title):
@@ -1748,7 +1807,8 @@ def _mig_synopsis(items, title):
     lines = best.split("\n")
     if lines and lines[0].strip().lower() == title.strip().lower():
         lines = lines[1:]
-    return clean_migrate_caption("\n".join(lines))
+    out = clean_migrate_caption("\n".join(lines))
+    return out if _mig_syn_ok(out, title) else ""
 
 
 def _mig_keyboard(deep_link):
@@ -1874,6 +1934,48 @@ async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
     return ok, first_id
 
 
+_MIG_STOPWORDS = {"the", "and", "of", "in", "a", "to", "for", "part", "season",
+                  "episode", "ep", "complete", "completed", "end"}
+
+
+def _mig_series_tokens(title):
+    base = _mig_series_base(_mig_clean_title(title or ""))
+    words = re.sub(r"[^0-9a-z\u1000-\u109f]+", " ", base.lower()).split()
+    return {w for w in words
+            if w not in _MIG_STOPWORDS
+            and not re.fullmatch(r"(?:19|20)\d{2}|s\d{1,2}|e\d{1,3}|"
+                                 r"s\d{1,2}e\d{1,3}|\d+", w)
+            and (len(w) > 1 or w.isalpha())}
+
+
+def _mig_series_doc(src, series_key, title=None):
+    """Series docs are global (one post per series); keep the old id as fallback.
+
+    The source often names the same series differently from one batch to the
+    next ("Gen V (2023)" vs "Gen V Trojan 2"), so fall back to a title-token
+    match instead of publishing a second post.
+    """
+    for _id in (f"s:{series_key}", f"{src}:s:{series_key}"):
+        doc = migrated_collection.find_one({"_id": _id})
+        if doc:
+            return doc
+    toks = _mig_series_tokens(title or "")
+    if not toks:
+        return None
+    for d in migrated_collection.find({"series_key": {"$exists": True},
+                                       "done": True,
+                                       "payload": {"$exists": True}}):
+        dt = _mig_series_tokens(d.get("title") or "")
+        if not dt:
+            continue
+        small, big = (toks, dt) if len(toks) <= len(dt) else (dt, toks)
+        if len(small) < 2:
+            continue
+        if len(small & big) / len(small) >= 0.75:
+            return d
+    return None
+
+
 async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
                                  src, series_key, sdoc, items):
     """A new episode of an already-published series: add files to that post.
@@ -1913,7 +2015,7 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
             context, payload, title, [photo] if photo else [], added,
             seasons, sorted(new_eps))
         migrated_collection.update_one(
-            {"_id": f"{src}:s:{series_key}"},
+            {"_id": sdoc["_id"]},
             {"$inc": {"episodes": len(added)},
              "$set": {"db_saved": True,
                       "db_post_id": db_post_id or sdoc.get("db_post_id")}},
@@ -1935,7 +2037,7 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
         caption = _mig_build_caption(title, synopsis, seasons, eps)
 
     migrated_collection.update_one(
-        {"_id": f"{src}:s:{series_key}"},
+        {"_id": sdoc["_id"]},
         {"$set": {"seasons": sorted(seasons), "eps": sorted(eps),
                   "synopsis": synopsis, "caption": caption}},
     )
@@ -1947,7 +2049,7 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
         {"$set": {
             "done": True,
             "title": title,
-            "merged_into": f"{src}:s:{series_key}",
+            "merged_into": sdoc["_id"],
             "published_at": time.time(),
         }},
         upsert=True,
@@ -1959,7 +2061,7 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
                               items, series_key=None, src=None):
 
     if series_key:
-        sdoc = migrated_collection.find_one({"_id": f"{src}:s:{series_key}"})
+        sdoc = _mig_series_doc(src, series_key, _mig_title(items))
         if sdoc and sdoc.get("done") and sdoc.get("payload"):
             await _mig_merge_into_series(context, key, src, series_key, sdoc,
                                          items)
@@ -2049,7 +2151,7 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
         if photos:
             _mig_series_photo[(src, series_key)] = photos[0]
         migrated_collection.update_one(
-            {"_id": f"{src}:s:{series_key}"},
+            {"_id": f"s:{series_key}"},
             {"$set": {
                 "done": True,
                 "source": src,
@@ -2706,15 +2808,190 @@ async def dbeps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(worker())
 
 
+def _mig_doc_title(d):
+    """Title of a published post; falls back to the movie file name."""
+    t = _mig_good_title(d.get("title") or "")
+    if t:
+        return t
+    for f in get_file_info(d.get("payload") or {}) or []:
+        t = _mig_good_title(_clean_file_title(f.get("file_name") or ""))
+        if t:
+            return _mig_series_base(t) or t
+    return ""
+
+
+def _mig_best_title(docs):
+    """Pick the cleanest title among the posts of one series."""
+    best, best_score = "", -99
+    for d in docs:
+        raw = (d.get("title") or "").strip()
+        t = _mig_doc_title(d)
+        if not t:
+            continue
+        score = 0
+        if re.search(r"\b(?:19|20)\d{2}\b", t):
+            score += 2
+        if _MIG_TITLE_FILE.search(raw):
+            score -= 3
+        if len(_mig_series_base(t)) < 3:
+            score -= 3
+        if score > best_score:
+            best, best_score = t, score
+    return best or "🎬 ဇာတ်ကားအသစ်"
+
+
+def _mig_group_posts(docs):
+    """Cluster published posts whose titles are the same series."""
+    groups = []
+    for d in sorted(docs, key=lambda x: int(x.get("post_id") or 0)):
+        toks = _mig_series_tokens(_mig_doc_title(d))
+        if not toks:
+            continue
+        for g in groups:
+            small, big = ((toks, g["toks"]) if len(toks) <= len(g["toks"])
+                          else (g["toks"], toks))
+            if len(small) >= 2 and len(small & big) / len(small) >= 0.8:
+                g["docs"].append(d)
+                g["toks"] |= toks
+                break
+        else:
+            groups.append({"toks": set(toks), "docs": [d]})
+    return [g["docs"] for g in groups]
+
+
+async def _seriesmerge(bot, dry=False):
+    """Merge published per-episode posts of one series into ONE post.
+
+    Also repairs junk titles ("Ep 1+2", "Gen V Trojan 2") by reading the movie
+    file name stored in the post payload.
+    """
+    docs = list(migrated_collection.find({
+        "post_id": {"$exists": True},
+        "merged_into": {"$exists": False},
+    }))
+    cand = []
+    for d in docs:
+        t = d.get("title") or ""
+        if (d.get("series_key") or int(d.get("episodes") or 0) >= 2
+                or _MIG_EP_MARK.search(t) or _MIG_EP_LIST.search(t)
+                or not _mig_good_title(t)):
+            cand.append(d)
+    groups = _mig_group_posts(cand)
+    if dry:
+        return groups, 0, 0, 0, 0
+
+    merged = deleted = failed = renamed = 0
+    for items in groups:
+        items.sort(key=lambda d: int(d.get("post_id") or 0))
+        keep = items[0]
+        keep_id = int(keep["post_id"])
+        payload = keep.get("payload")
+        if not payload:
+            payload = generate_payload()
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=AUTO_PUBLISH_CHANNEL, message_id=keep_id,
+                    reply_markup=_mig_keyboard(
+                        create_deep_linked_url(bot.username, payload)))
+            except Exception as exc:
+                logger.warning("seriesmerge markup failed %s: %s", keep_id, exc)
+            migrated_collection.update_one(
+                {"_id": keep["_id"]}, {"$set": {"payload": payload}})
+
+        seasons, eps = set(), set()
+        for d in items:
+            seasons.update(int(x) for x in (d.get("seasons") or []))
+            eps.update(int(x) for x in (d.get("eps") or []))
+        total = sum(int(d.get("episodes") or 0) for d in items)
+        if not eps and total > 1:
+            eps = set(range(1, total + 1))
+        if eps and not seasons:
+            seasons = {1}
+        title = _mig_best_title(items)
+        if _MIG_EP_MARK.search(title):
+            title = _mig_series_base(title) or title
+        synopsis = ""
+        for d in items:
+            s = (d.get("synopsis") or "").strip()
+            if s and _mig_syn_ok(s, title):
+                synopsis = s
+                break
+
+        if len(items) == 1:
+            # a single post: only fix a junk title, never touch its files
+            old = _mig_clean_title(keep.get("title") or "")
+            if not title or title == old:
+                continue
+            caption = _mig_build_caption(title, synopsis, seasons, eps)
+            try:
+                await bot.edit_message_caption(
+                    chat_id=AUTO_PUBLISH_CHANNEL, message_id=keep_id,
+                    caption=caption)
+                renamed += 1
+            except Exception as exc:
+                logger.warning("seriesmerge rename failed %s: %s", keep_id, exc)
+                failed += 1
+                continue
+            migrated_collection.update_one(
+                {"_id": keep["_id"]},
+                {"$set": {"title": title, "caption": caption,
+                          "seasons": sorted(seasons), "eps": sorted(eps)}})
+            await asyncio.sleep(1.0)
+            continue
+
+        for d in items[1:]:
+            pid = int(d["post_id"])
+            donor = d.get("payload")
+            if donor:
+                for f in get_file_info(donor) or []:
+                    save_file_info(payload, f["file_id"], f["file_name"],
+                                   f.get("file_caption"))
+                    if f.get("channel_message_id"):
+                        set_file_channel_message(payload, f["file_id"],
+                                                 f["channel_message_id"])
+            try:
+                await bot.delete_message(AUTO_PUBLISH_CHANNEL, pid)
+                deleted += 1
+            except Exception as exc:
+                logger.warning("seriesmerge delete failed %s: %s", pid, exc)
+                failed += 1
+                continue
+            migrated_collection.update_one(
+                {"_id": d["_id"]},
+                {"$set": {"merged_into": f"post:{keep_id}"}})
+            merged += 1
+            await asyncio.sleep(1.2)
+
+        caption = _mig_build_caption(title, synopsis, seasons, eps)
+        try:
+            await bot.edit_message_caption(
+                chat_id=AUTO_PUBLISH_CHANNEL, message_id=keep_id,
+                caption=caption)
+        except Exception as exc:
+            logger.warning("seriesmerge caption failed %s: %s", keep_id, exc)
+            failed += 1
+        migrated_collection.update_one(
+            {"_id": keep["_id"]},
+            {"$set": {"title": title, "caption": caption,
+                      "seasons": sorted(seasons), "eps": sorted(eps),
+                      "episodes": max(total, len(items)),
+                      "payload": payload, "series_fixed": True}})
+        await asyncio.sleep(1.2)
+    return groups, merged, deleted, failed, renamed
+
+
 async def _epsfix_once(bot, admin_chat):
-    """One-time backfill: Season/Episode on old posts and DB-channel files."""
-    await asyncio.sleep(90)
+    """One-time backfill: merge split series, then Season/Episode captions."""
+    await asyncio.sleep(60)
     try:
+        g, merged, deleted, failed, renamed = await _seriesmerge(bot)
         p = await _epsfix_posts(bot, admin_chat)
         d = await _epsfix_db(bot, admin_chat)
         await bot.send_message(
             admin_chat,
-            f"📺 Season/Episode ဖြည့်ပြီး\n"
+            f"🧩 series merge: {len(g)} group / merged {merged} / deleted {deleted}"
+            f" / renamed {renamed} / fail {failed}\n"
+            f"📺 Season/Episode\n"
             f"post: {p[0]} (ကျော် {p[1]}, fail {p[2]})\n"
             f"DB: {d[0]} (ကျော် {d[1]}, fail {d[2]})")
     except Exception as exc:
@@ -2722,11 +2999,11 @@ async def _epsfix_once(bot, admin_chat):
 
 
 async def _epsfix_post_init(application):
-    """Run the Season/Episode backfill once, right after a deploy."""
+    """Run the one-time repair after a deploy."""
     try:
-        if db["config"].find_one({"_id": "epsfix_once"}):
+        if db["config"].find_one({"_id": "backfill2_once"}):
             return
-        db["config"].update_one({"_id": "epsfix_once"},
+        db["config"].update_one({"_id": "backfill2_once"},
                                 {"$set": {"ts": time.time()}}, upsert=True)
         cfg = db["config"].find_one({"_id": "forwarder"}) or {}
         admin = int(cfg.get("admin_chat") or 1147922719)
@@ -2889,7 +3166,7 @@ async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             src = keep.get("source")
             if src:
                 migrated_collection.update_one(
-                    {"_id": f"{src}:s:{k}"},
+                    {"_id": f"s:{k}"},
                     {"$set": {"done": True, "source": src, "series_key": k,
                               "title": base_title, "post_id": keep_id,
                               "payload": payload, "db_saved": True,
@@ -2902,6 +3179,39 @@ async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id,
                 f"✅ Series fix done\nmerged: {merged}\ndeleted: {deleted}\n"
                 f"failed: {failed}")
+        except Exception:
+            pass
+
+    context.application.create_task(worker())
+
+
+async def seriesmerge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Merge split series posts by title similarity.  /seriesmerge dry | /seriesmerge"""
+    if not is_admin(update.effective_user.id):
+        return
+    if not AUTO_PUBLISH_CHANNEL:
+        await update.message.reply_text("⚠️ target channel not set.")
+        return
+    dry = any(a.lower() == "dry" for a in (context.args or []))
+    chat_id = update.effective_chat.id
+    if dry:
+        groups, *_ = await _seriesmerge(context.bot, dry=True)
+        lines = [f"🧩 {len(groups)} series"]
+        for items in groups[:20]:
+            lines.append(" + ".join(
+                f"{_mig_doc_title(d)}({d.get('post_id')})" for d in items)[:180])
+        await update.message.reply_text("\n".join(lines)[:3900])
+        return
+    await update.message.reply_text("🧩 Series post တွေ ပေါင်းနေတယ်...")
+
+    async def worker():
+        groups, merged, deleted, failed, renamed = await _seriesmerge(context.bot)
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Series merge ပြီးပါပြီ\nseries: {len(groups)}\n"
+                f"merged: {merged}\ndeleted: {deleted}\n"
+                f"renamed: {renamed}\nfailed: {failed}")
         except Exception:
             pass
 
@@ -3651,6 +3961,7 @@ def build_application(token):
     application.add_handler(CommandHandler("dbcheck", dbcheck_command))
     application.add_handler(CommandHandler("dbrepair", dbrepair_command))
     application.add_handler(CommandHandler("seriesfix", seriesfix_command))
+    application.add_handler(CommandHandler("seriesmerge", seriesmerge_command))
     application.add_handler(CommandHandler("setsession", setsession_command))
     application.add_handler(CommandHandler("forwardstart", forwardstart_command))
     application.add_handler(CommandHandler("forwardstop", forwardstop_command))
