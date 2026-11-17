@@ -139,6 +139,26 @@ def status():
         out["forwarder"] = {"error": str(exc)}
     return jsonify(out)
 
+
+@app.route('/payload')
+def payload_info():
+    """Read-only check: how many files a deep-link payload really holds."""
+    from flask import jsonify, request
+    t = (request.args.get("t") or "").strip()
+    if not t:
+        return jsonify({"ok": False, "error": "missing t"}), 400
+    doc = file_store_collection.find_one({"payload": t}) or {}
+    files = doc.get("files") or []
+    return jsonify({
+        "ok": True,
+        "payload": t,
+        "count": len(files),
+        "names": [f.get("file_name") for f in files],
+        "captions": [f.get("file_caption") for f in files],
+        "with_db_message": sum(1 for f in files
+                               if f.get("channel_message_id")),
+    })
+
 # ---------- MongoDB Connection ----------
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
@@ -1560,9 +1580,12 @@ _mig_albums = {}
 _mig_last_photo = {}
 _mig_series_photo = {}
 _MIG_PUBLISH_LOCK = asyncio.Lock()
-MIG_QUIET_PERIOD = 2.0
-MIG_QUIET_PHOTO = 6.5
-MIG_MAX_WAIT = 120.0
+# The cloud forwarder sends a channel's posts one at a time (~3.8 s apart), so
+# a quiet window shorter than that publishes every episode as its own post.
+MIG_QUIET_PERIOD = 9.0
+MIG_QUIET_PHOTO = 9.0
+MIG_QUIET_SERIES = 12.0
+MIG_MAX_WAIT = 180.0
 
 
 _MIG_EP_MARK = re.compile(
@@ -1708,12 +1731,15 @@ def _mig_eps_line(seasons, eps):
 
 def _mig_build_caption(title, synopsis, seasons=None, eps=None,
                        max_len=1024):
+    """Reference layout: title, '📝 ဇာတ်ကားအကြောင်း', Season/Episode, synopsis."""
     cap = title
     line = _mig_eps_line(seasons or (), eps or ())
-    if line:
-        cap += f"\n{line}"
-    if synopsis:
-        cap += f"\n\n📝 ဇာတ်ကားအကြောင်း\n\n{synopsis}"
+    if line or synopsis:
+        cap += "\n\n📝 ဇာတ်ကားအကြောင်း"
+        if line:
+            cap += f"\n\n{line}"
+        if synopsis:
+            cap += f"\n{synopsis}"
     return append_upload_credit(cap, max_len=max_len)
 
 
@@ -1980,74 +2006,32 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
 
 async def _mig_post_album(context: ContextTypes.DEFAULT_TYPE, photos, videos,
                           caption, reply_markup, chat_id=None):
-    """Publish one channel post with EVERY file of the release.
+    """Publish the ONE channel post that represents a movie / series.
 
-    * 0-1 video -> normal photo/video post, buttons attached inline.
-    * 2+ videos -> Telegram album (poster + all episodes). Albums cannot carry
-      inline buttons, so the buttons go on a small message right under it.
+    Always a single photo (or the first video when there is no poster) with the
+    deep-link buttons attached inline - exactly like the reference series post.
+    Every episode is delivered by the bot behind that one deep link, never as
+    extra visible files in the channel.
+
     Returns (post_id, button_id).
     """
     chat_id = chat_id or AUTO_PUBLISH_CHANNEL
-    if not chat_id:
+    if not chat_id or (not photos and not videos):
         return None, None
-    if not photos and not videos:
+    try:
+        if photos:
+            sent = await _with_flood(lambda: context.bot.send_photo(
+                chat_id=chat_id, photo=photos[0]["file_id"],
+                caption=caption, reply_markup=reply_markup))
+        else:
+            sent = await _with_flood(lambda: context.bot.send_video(
+                chat_id=chat_id, video=videos[0]["file_id"],
+                caption=caption, reply_markup=reply_markup,
+                supports_streaming=True))
+    except Exception as exc:
+        logger.error("post single media failed: %s", exc)
         return None, None
-
-    if len(videos) <= 1:
-        try:
-            if photos:
-                sent = await _with_flood(lambda: context.bot.send_photo(
-                    chat_id=chat_id, photo=photos[0]["file_id"],
-                    caption=caption, reply_markup=reply_markup))
-            else:
-                sent = await _with_flood(lambda: context.bot.send_video(
-                    chat_id=chat_id, video=videos[0]["file_id"],
-                    caption=caption, reply_markup=reply_markup,
-                    supports_streaming=True))
-        except Exception as exc:
-            logger.error("post single media failed: %s", exc)
-            return None, None
-        return (sent.message_id if sent else None), None
-
-    media = []
-    if photos:
-        media.append(InputMediaPhoto(photos[0]["file_id"], caption=caption))
-    for v in videos:
-        media.append(InputMediaVideo(
-            v["file_id"],
-            caption=None if media else caption,
-            supports_streaming=True))
-
-    sent_msgs = []
-    for i in range(0, len(media), 10):
-        chunk = media[i:i + 10]
-        try:
-            res = await _with_flood(
-                lambda: context.bot.send_media_group(chat_id=chat_id,
-                                                     media=chunk))
-            sent_msgs.extend(res or [])
-        except Exception as exc:
-            logger.error("album send failed (%d items): %s", len(chunk), exc)
-            break
-        await asyncio.sleep(1.2)
-
-    if not sent_msgs:
-        return None, None
-
-    post_id = sent_msgs[0].message_id
-    button_id = None
-    if reply_markup:
-        try:
-            btn = await context.bot.send_message(
-                chat_id=chat_id,
-                text="🎬 ဒီဇာတ်ကားကို ရယူရန် 👇",
-                reply_markup=reply_markup,
-                reply_to_message_id=post_id,
-            )
-            button_id = btn.message_id
-        except Exception as exc:
-            logger.warning("album button message failed: %s", exc)
-    return post_id, button_id
+    return (sent.message_id if sent else None), None
 
 
 def _mig_db_caption(title, seasons, ep=None, eps=None):
@@ -2134,6 +2118,22 @@ def _mig_series_tokens(title):
             and (len(w) > 1 or w.isalpha())}
 
 
+def _mig_name_prefix(name, words=3):
+    """'Show.Name.S01E02.720p.mkv' -> 'show name' (episode markers dropped).
+
+    Used to keep a series sent as separate files together even when its
+    captions do not repeat the show name.
+    """
+    base = _mig_series_base(_clean_file_title(name or ""))
+    toks = re.sub(r"[^0-9a-z\u1000-\u109f]+", " ", base.lower()).split()
+    toks = [t for t in toks
+            if t not in _MIG_STOPWORDS
+            and t not in {"movie", "video", "file", "photo", "download"}
+            and not re.fullmatch(r"(?:19|20)\d{2}|s\d{1,2}|e\d{1,3}|"
+                                 r"s\d{1,2}e\d{1,3}|\d+", t)]
+    return " ".join(toks[:words])
+
+
 def _mig_series_doc(src, series_key, title=None):
     """Series docs are global (one post per series); keep the old id as fallback.
 
@@ -2206,33 +2206,21 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
              "$set": {"db_saved": True,
                       "db_post_id": db_post_id or sdoc.get("db_post_id")}},
         )
-    # rebuild the one shared series post so EVERY episode is visible in it
+    # Keep the single series post: only refresh its Season / Episode line. New
+    # files were appended to the SAME payload, so the one deep link in that
+    # post now delivers every episode - no extra post, no duplicate.
     post_id = sdoc.get("post_id")
     button_id = sdoc.get("button_id")
     caption = _mig_build_caption(title, synopsis, seasons, eps)
-    all_files = get_file_info(payload) or [] if payload else []
-    all_videos = [{"file_id": f.get("file_id"),
-                   "file_name": f.get("file_name")} for f in all_files
-                  if f.get("file_id")]
-    if payload and all_videos:
-        deep_link = create_deep_linked_url(context.bot.username, payload)
-        new_post, new_btn = await _mig_post_album(
-            context, [photo] if photo else [], all_videos, caption,
-            _mig_keyboard(deep_link))
-        if new_post:
-            for old in (post_id, button_id):
-                if old:
-                    try:
-                        await context.bot.delete_message(
-                            AUTO_PUBLISH_CHANNEL, int(old))
-                    except Exception:
-                        pass
-            post_id, button_id = new_post, new_btn
-            migrated_collection.update_one(
-                {"_id": sdoc["_id"]},
-                {"$set": {"post_id": post_id, "button_id": button_id}})
-            logger.info("series post rebuilt: %s (%d files)",
-                        title, len(all_videos))
+    if post_id and caption != (sdoc.get("caption") or ""):
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=AUTO_PUBLISH_CHANNEL,
+                message_id=int(post_id),
+                caption=caption,
+            )
+        except Exception as exc:
+            logger.warning("series caption update failed (%s): %s", title, exc)
 
     migrated_collection.update_one(
         {"_id": sdoc["_id"]},
@@ -2291,14 +2279,7 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
     else:
         reply_markup = None
 
-    header = "📝 ဇာတ်ကားအကြောင်း"
-    caption = title
-    eps_line = _mig_eps_line(seasons, eps)
-    if eps_line:
-        caption += f"\n{eps_line}"
-    if synopsis:
-        caption += f"\n\n{header}\n\n{synopsis}"
-    caption = append_upload_credit(caption, max_len=1024)
+    caption = _mig_build_caption(title, synopsis, seasons, eps)
 
     post_id, button_id = await _mig_post_album(
         context, photos, videos, caption, reply_markup)
@@ -2413,27 +2394,31 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
                         item["caption"], item["file_name"])):
                 key = pk
         if key is None:
-            # No poster, no episode marker: a release posted as several files
-            # in a row (episodes / quality mirrors) shares the caption title.
-            # Batch them into ONE post instead of one post per file.
-            my_title = _mig_clean_title(
-                (item["caption"] or "").strip().split("\n", 1)[0]
-                or item["file_name"] or "")
-            my_toks = _mig_series_tokens(my_title)
+            # No poster and no usable title (e.g. captions are only "EP 2"):
+            # a series sent as several files in a row must still become ONE
+            # post, so join the newest pending video batch of this source when
+            # the captions / file names name the same show.
+            my_toks = _mig_series_tokens(
+                _mig_clean_title(f"{item['caption'] or ''} "
+                                 f"{item['file_name'] or ''}"))
+            my_pref = _mig_name_prefix(item["file_name"])
             now_m = time.monotonic()
             for k, e in list(_mig_albums.items()):
                 if e.get("src") != src or not e["items"]:
                     continue
-                if now_m - e["last_update"] > 240:
+                if now_m - e["last_update"] > 300:
                     continue
                 if any(i["kind"] == "photo" for i in e["items"]):
                     continue
                 first = e["items"][0]
-                t0 = _mig_clean_title(
-                    (first["caption"] or "").strip().split("\n", 1)[0]
-                    or first["file_name"] or "")
-                t0_toks = _mig_series_tokens(t0)
-                if (my_toks and t0_toks and my_toks == t0_toks):
+                t0_toks = _mig_series_tokens(
+                    _mig_clean_title(f"{first['caption'] or ''} "
+                                     f"{first['file_name'] or ''}"))
+                same = bool(my_toks and t0_toks and my_toks == t0_toks)
+                if not same and my_pref \
+                        and my_pref == _mig_name_prefix(first["file_name"]):
+                    same = True
+                if same:
                     key = k
                     break
         if key is None:
@@ -2452,7 +2437,8 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
             "chat_id": message.chat_id,
             "src": src,
             "series": series_key,
-            "quiet": MIG_QUIET_PERIOD if group_id else MIG_QUIET_PHOTO,
+            "quiet": (MIG_QUIET_SERIES if series_key
+                      else MIG_QUIET_PERIOD if group_id else MIG_QUIET_PHOTO),
         }
     entry = _mig_albums[key]
     if series_key and (is_photo or not entry.get("series")):
