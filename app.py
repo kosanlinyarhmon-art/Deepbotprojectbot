@@ -1403,10 +1403,61 @@ _MIG_QUALITY = re.compile(
 
 _mig_albums = {}
 _mig_last_photo = {}
+_mig_series_photo = {}
 _MIG_PUBLISH_LOCK = asyncio.Lock()
 MIG_QUIET_PERIOD = 2.0
 MIG_QUIET_PHOTO = 6.5
 MIG_MAX_WAIT = 45.0
+
+
+_MIG_EP_MARK = re.compile(
+    r"(?:"
+    r"\bs\s*\d{1,2}\s*[-_. ]?\s*e\s*p?\s*\d{1,3}\b"
+    r"|\bep\s*[-_. ]?\s*\d{1,4}\b"
+    r"|\bepisode\s*[-_. ]?\s*\d{1,4}\b"
+    r"|\bseason\s*[-_. ]?\s*\d{1,2}\b"
+    r"|\be\s*\d{1,3}\b"
+    r")", re.I)
+_MIG_EP_NOISE = re.compile(
+    r"\b(?:end|completed?|final|uncut|extended|full|all)\b", re.I)
+
+
+def _mig_series_base(title):
+    """Strip episode/season markers: 'Spider-Noir (2026) Ep 7' -> 'Spider-Noir (2026)'."""
+    if not title:
+        return ""
+    base = _MIG_EP_MARK.sub(" ", title)
+    base = _MIG_EP_NOISE.sub(" ", base)
+    base = re.sub(r"[\(\)\[\]\{\}\-_~|]+", " ", base)
+    base = re.sub(r"\s{2,}", " ", base).strip(" .,-")
+    return base
+
+
+def _mig_series_key(item):
+    """Group key for a series: base title without episode markers.
+
+    Episodes of one series share this key, so they end up on ONE post with ONE
+    deep link.  A different title/caption gives a different key -> new post.
+    """
+    title = _mig_item_title(item)
+    base = _mig_series_base(title)
+    if not base:
+        return ""
+    if not _MIG_QUALITY.sub("", base).strip():
+        return ""
+    key = re.sub(r"[^0-9a-z\u1000-\u109f]+", "", base.lower())
+    if len(key) < 4 or key.isdigit():
+        return ""
+    if not re.search(r"[a-z\u1000-\u109f]", key):
+        return ""
+    return key
+
+
+def _mig_item_title(item):
+    cap = (item.get("caption") or "").strip()
+    if cap:
+        return cap.split("\n", 1)[0].strip()
+    return _clean_file_title(item.get("file_name") or "")
 
 
 def _mig_tokens(text):
@@ -1581,16 +1632,18 @@ async def _mig_flush_later(context: ContextTypes.DEFAULT_TYPE, key: str):
     if _mig_last_photo.get(entry.get("src")) == key:
         _mig_last_photo.pop(entry.get("src"), None)
     try:
-        await _mig_publish(context, key, entry["items"])
+        await _mig_publish(context, key, entry["items"],
+                           entry.get("series"), entry.get("src"))
     except Exception as exc:
         logger.error("migration publish failed (%s): %s", key, exc, exc_info=True)
 
 
-async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items):
+async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
+                       series_key=None, src=None):
     if not AUTO_PUBLISH_CHANNEL or not items:
         return
     async with _MIG_PUBLISH_LOCK:
-        await _mig_publish_locked(context, key, items)
+        await _mig_publish_locked(context, key, items, series_key, src)
 
 
 async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
@@ -1644,10 +1697,68 @@ async def _mig_save_to_db(context: ContextTypes.DEFAULT_TYPE, payload, title,
     return ok
 
 
-async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str, items):
+async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
+                                 src, series_key, sdoc, items):
+    """A new episode of an already-published series: add files to that post.
+
+    No new channel post is created, so every episode shares ONE deep link.
+    """
+    payload = sdoc.get("payload")
+    title = sdoc.get("title") or _mig_title(items) or "🎬 ဇာတ်ကားအသစ်"
+    videos = [it for it in items if it["kind"] != "photo"]
+    photos = [it for it in items if it["kind"] == "photo"]
+    if photos:
+        _mig_series_photo[(src, series_key)] = photos[0]
+    photo = photos[0] if photos else _mig_series_photo.get((src, series_key))
+
+    added = []
+    if payload:
+        known = {f.get("file_id") for f in (get_file_info(payload) or [])}
+        for it in videos:
+            if it["file_id"] in known:
+                continue
+            save_file_info(payload, it["file_id"], it["file_name"], title)
+            known.add(it["file_id"])
+            added.append(it)
+
+    if added and payload:
+        await _mig_save_to_db(context, payload, title,
+                              [photo] if photo else [], added)
+        migrated_collection.update_one(
+            {"_id": f"{src}:s:{series_key}"},
+            {"$inc": {"episodes": len(added)}, "$set": {"db_saved": True}},
+        )
+    logger.info("series episode merged: %s (+%d files, %d items)",
+                title, len(added), len(items))
+    migrated_collection.update_one(
+        {"_id": key},
+        {"$set": {
+            "done": True,
+            "title": title,
+            "merged_into": f"{src}:s:{series_key}",
+            "published_at": time.time(),
+        }},
+        upsert=True,
+    )
+    await asyncio.sleep(MIGRATE_GAP * max(1, len(items)))
+
+
+async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
+                              items, series_key=None, src=None):
+
+    if series_key:
+        sdoc = migrated_collection.find_one({"_id": f"{src}:s:{series_key}"})
+        if sdoc and sdoc.get("done") and sdoc.get("payload"):
+            await _mig_merge_into_series(context, key, src, series_key, sdoc,
+                                         items)
+            return
 
     title = _mig_title(items) or "🎬 ဇာတ်ကားအသစ်"
     title = clean_migrate_caption(title)[:200].strip() or "🎬 ဇာတ်ကားအသစ်"
+    if series_key and _MIG_EP_MARK.search(title):
+        base_title = _mig_series_base(title)
+        if base_title:
+            title = base_title
     synopsis = _mig_synopsis(items, title)
 
     videos = [it for it in items if it["kind"] != "photo"]
@@ -1709,6 +1820,24 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str, item
         }},
         upsert=True,
     )
+    if series_key:
+        if photos:
+            _mig_series_photo[(src, series_key)] = photos[0]
+        migrated_collection.update_one(
+            {"_id": f"{src}:s:{series_key}"},
+            {"$set": {
+                "done": True,
+                "source": src,
+                "series_key": series_key,
+                "title": title,
+                "post_id": sent.message_id,
+                "payload": payload,
+                "db_saved": bool(db_ok),
+                "episodes": len(videos),
+                "published_at": time.time(),
+            }},
+            upsert=True,
+        )
     await asyncio.sleep(MIGRATE_GAP * max(1, len(items)))
 
 
@@ -1731,9 +1860,15 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
     src_msg_id = _mig_source_msg_id(message)
     group_id = getattr(message, "media_group_id", None)
     is_photo = item["kind"] == "photo"
+    series_key = _mig_series_key(item)
+    series_doc_id = f"{src}:s:{series_key}" if series_key else None
 
     if group_id:
         key = f"{src}:g{group_id}"
+    elif series_doc_id:
+        # every episode of one series shares this buffer, so they all land on
+        # ONE post / ONE deep link
+        key = series_doc_id
     elif is_photo:
         key = f"{src}:p{src_msg_id or message.message_id}"
         _mig_last_photo[src] = key
@@ -1755,7 +1890,7 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
             key = f"{src}:m{src_msg_id or message.message_id}"
 
     doc = migrated_collection.find_one({"_id": key})
-    if doc and doc.get("done"):
+    if doc and doc.get("done") and key != series_doc_id:
         raise ApplicationHandlerStop
 
     now = time.monotonic()
@@ -1766,9 +1901,12 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
             "last_update": now,
             "chat_id": message.chat_id,
             "src": src,
+            "series": series_key,
             "quiet": MIG_QUIET_PERIOD if group_id else MIG_QUIET_PHOTO,
         }
     entry = _mig_albums[key]
+    if series_key and (is_photo or not entry.get("series")):
+        entry["series"] = series_key
     entry["items"].append(item)
     entry["last_update"] = now
 
