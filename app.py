@@ -2198,6 +2198,91 @@ def _mig_title_series_key(title):
     return key
 
 
+async def setsession_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store the userbot session string in Mongo so the cloud forwarder can run."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /setsession <session string>")
+        return
+    try:
+        import cloud_forwarder
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ forwarder module error: {exc}")
+        return
+    cloud_forwarder.set_config(session=" ".join(context.args).strip(),
+                               enabled=False)
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "✅ userbot session saved. /forwardstart <last_id> နဲ့ စတင်ပါ။")
+
+
+async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the cloud forwarder (no PC needed)."""
+    if not is_admin(update.effective_user.id):
+        return
+    try:
+        import cloud_forwarder
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ forwarder module error: {exc}")
+        return
+    cfg = cloud_forwarder.config()
+    if not cfg.get("session"):
+        await update.message.reply_text("⚠️ /setsession <string> အရင်လုပ်ပါ။")
+        return
+    args = context.args or []
+    cloud_forwarder.set_config(enabled=True)
+    if args and args[0].isdigit():
+        first = (cfg.get("sources") or cloud_forwarder.DEFAULT_SOURCES)[0]
+        cloud_forwarder.state_col().update_one(
+            {"_id": str(cloud_forwarder.to_entity_id(first))},
+            {"$set": {"last_id": int(args[0])}},
+            upsert=True)
+    started = cloud_forwarder.start_in_background()
+    await update.message.reply_text(
+        "▶️ Cloud forwarder စတင်ပါပြီ။" if started
+        else "ℹ️ Forwarder run နေပြီးသား (/forwardstate ကြည့်ပါ)")
+
+
+async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    try:
+        import cloud_forwarder
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+    cloud_forwarder.set_config(enabled=False)
+    cloud_forwarder.stop()
+    await update.message.reply_text("⏹️ Cloud forwarder ရပ်နေပါပြီ။")
+
+
+async def forwardstate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    try:
+        import cloud_forwarder
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+    cfg = cloud_forwarder.config()
+    rows = list(cloud_forwarder.state_col().find({}))
+    lines = [
+        "🚚 Cloud forwarder",
+        f"enabled: {bool(cfg.get('enabled'))}",
+        f"session: {'set' if cfg.get('session') else 'missing'}",
+    ]
+    for r in rows:
+        lines.append(
+            f"{r.get('title') or r.get('_id')}: last={r.get('last_id')} "
+            f"done={r.get('done', 0)} failed={r.get('failed', 0)}")
+    await update.message.reply_text("\n".join(lines)[:3900])
+
+
 async def seriesfix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Consolidate per-episode series posts into ONE post with ONE deep link.
 
@@ -3057,6 +3142,10 @@ def build_application(token):
     application.add_handler(CommandHandler("dbcheck", dbcheck_command))
     application.add_handler(CommandHandler("dbrepair", dbrepair_command))
     application.add_handler(CommandHandler("seriesfix", seriesfix_command))
+    application.add_handler(CommandHandler("setsession", setsession_command))
+    application.add_handler(CommandHandler("forwardstart", forwardstart_command))
+    application.add_handler(CommandHandler("forwardstop", forwardstop_command))
+    application.add_handler(CommandHandler("forwardstate", forwardstate_command))
     application.add_handler(CommandHandler("dbinfo", dbinfo_command))
     application.add_handler(newpost_handler)
     application.add_handler(batchlink_handler)
@@ -3199,6 +3288,12 @@ def run_flask():
 if __name__ == "__main__":
     migrate_old_documents()
     threading.Thread(target=run_flask, daemon=True).start()
+    try:
+        import cloud_forwarder
+        if cloud_forwarder.start_in_background():
+            logger.info("Cloud forwarder started.")
+    except Exception as exc:
+        logger.warning("Cloud forwarder start failed: %s", exc)
     run_bot()
 
 
