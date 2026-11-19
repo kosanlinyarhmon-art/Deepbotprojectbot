@@ -1608,6 +1608,7 @@ _mig_albums = {}
 _mig_last_photo = {}
 _mig_series_photo = {}
 _MIG_PUBLISH_LOCK = asyncio.Lock()
+_PAUSED_DROPS = 0
 # The cloud forwarder sends a channel's posts one at a time (~3.8 s apart), so
 # a quiet window shorter than that publishes every episode as its own post.
 MIG_QUIET_PERIOD = 9.0
@@ -2041,23 +2042,13 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
     except Exception:
         hold = False
     if hold:
-        # /forwardstop: keep the batch buffered instead of publishing it.
-        now = time.monotonic()
-        entry = _mig_albums.get(key)
-        if not entry:
-            entry = {
-                "items": [], "started": now, "chat_id": None,
-                "src": src, "series": series_key,
-                "quiet": (MIG_QUIET_SERIES if series_key
-                          else MIG_QUIET_PERIOD),
-            }
-            _mig_albums[key] = entry
-        entry["items"].extend(items)
-        entry["last_update"] = now
-        _cancel_mig_task(entry)
-        entry["task"] = context.application.create_task(
-            _mig_flush_later(context, key))
-        logger.info("paused: holding %d item(s) for %s", len(items), key)
+        # /forwardstop: drop the batch instead of publishing it. Holding it
+        # would dump a flood of old posts the moment the forwarder resumes.
+        global _PAUSED_DROPS
+        _PAUSED_DROPS += len(items)
+        if _PAUSED_DROPS <= 5 or _PAUSED_DROPS % 50 < len(items):
+            logger.info("paused: dropped %d item(s) for %s (total %d)",
+                        len(items), key, _PAUSED_DROPS)
         return
     async with _MIG_PUBLISH_LOCK:
         await _mig_publish_locked(context, key, items, series_key, src)
