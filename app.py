@@ -197,6 +197,27 @@ if DATABASE_CHANNEL_ID:
 # Channels whose member join/leave we report to the admins (movie channels).
 NOTIFY_CHANNEL_IDS = set(MOVIE_CHANNEL_IDS)
 
+# Admin-only series repair (read-only report by default, see series_admin.py).
+# The key is only a guard against random visitors; the bot token never leaves
+# the server and every write needs ?apply=1 explicitly.
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "wzn-vd-8Kq4mT2pR7sLx9Nb3Hc6")
+try:
+    from series_admin import register as _register_series_admin
+    _register_series_admin(
+        app,
+        token=TOKEN,
+        mongo_db=db,
+        channel_id=int(os.environ.get("PUBLISH_CHANNEL_ID",
+                                      "-1003753299714").strip()),
+        db_channel_id=DATABASE_CHANNEL_ID,
+        bot_username=BOT_USERNAME,
+        other_channels=OTHER_CHANNELS,
+        music_link=MUSIC_CHANNEL_LINK,
+        admin_key=ADMIN_KEY,
+    )
+except Exception as _series_admin_err:  # never block the bot on this helper
+    logger.error("series admin routes not registered: %s", _series_admin_err)
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -965,8 +986,11 @@ async def receive_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CAPTION
 
 async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text.lower() == 'a':
+    text = update.message.text or ""
+    # The admin's keyboard sometimes puts an invisible character before the
+    # final "a"; comparing raw text appended that line to the caption instead
+    # of finishing it (it showed up as a stray "‌a" under the header).
+    if _norm_signal(text).lower() == 'a':
         caption_parts = context.user_data.get('caption_parts', [])
         if not caption_parts:
             await update.message.reply_text("⚠️ ဇာတ်ညွှန်း စာသား မရှိသေးပါ။ စာသား ပို့ပေးပါ။")
@@ -1009,7 +1033,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 
     if not video:
         text = update.message.text or ""
-        if text.strip().lower() == 'a':
+        if _norm_signal(text).lower() == 'a':
             return await finalize_newpost(update, context)
 
         # Not a file: accept an admin-provided redirect link (deep / post link).
@@ -1471,6 +1495,14 @@ def append_upload_credit(text, max_len=1024):
     if len(text) + len(suffix) <= max_len:
         return text + suffix
     return text[:max_len - len(suffix)].rstrip() + suffix
+
+
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+
+
+def _norm_signal(text):
+    """Normalise a one-letter control word ("a") typed with hidden characters."""
+    return _INVISIBLE.sub("", text or "").strip()
 
 
 def clean_caption_db(text):
