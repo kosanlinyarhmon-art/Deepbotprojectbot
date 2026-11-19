@@ -110,7 +110,15 @@ def _clean_title(raw):
     t = _NOISE.sub(" ", t)
     t = re.sub(r"[\(\)\[\]]+", " ", t)
     t = re.sub(r"\s{2,}", " ", t)
-    return t.strip(" -.,·|")
+    t = t.strip(" -.,·|")
+    # Titles copied from file names are all lower case ("wizard",
+    # "disenchanment"); give them the capitalisation a hand-written post has.
+    if t and not re.search(r"[A-Z]", t):
+        small = {"a", "an", "and", "the", "of", "to", "in", "on", "for", "at"}
+        words = t.split()
+        t = " ".join(w if w in small and i else w[:1].upper() + w[1:]
+                     for i, w in enumerate(words))
+    return t
 
 
 def _clean_synopsis(raw):
@@ -385,7 +393,9 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             items = [summarise(d) for d in docs]
             if series_only:
                 items = [i for i in items if i["series"]]
-            return jsonify({"ok": True, "dry_run": True, "items": items})
+            return jsonify({"ok": True, "dry_run": True,
+                            "next_after": docs[-1].get("post_id") if docs else None,
+                            "items": items})
 
         docs = list(migrated.find(query).sort("post_id", 1).limit(limit))
         results = []
@@ -410,7 +420,10 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             except Exception as exc:
                 results.append({"id": str(d["_id"]), "ok": False,
                                 "why": str(exc)[:200]})
-            time.sleep(0.8)
-        return jsonify({"ok": True, "done": len(results), "results": results})
+            time.sleep(0.5)
+        return jsonify({"ok": True, "done": len(results),
+                        "scanned": len(docs),
+                        "next_after": docs[-1].get("post_id") if docs else None,
+                        "results": results})
 
     return app
