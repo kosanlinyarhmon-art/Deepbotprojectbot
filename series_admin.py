@@ -366,7 +366,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 "title": _range_title(doc, files),
                 "notes": notes}
 
-    def fix_video_post(doc, photo_id=None):
+    def fix_video_post(doc, photo_id=None, use_source=False):
         """Replace a rebuilt video post with a real photo (the video thumbnail).
 
         The migration used the video's own thumbnail as the poster image, so
@@ -390,6 +390,36 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             if shown.get("photo"):
                 return {"id": str(doc["_id"]), "ok": True, "post": pid,
                         "already_photo": True}
+            if use_source and doc.get("source") and doc.get("src_msg_id"):
+                notes = []
+                try:
+                    cp = bots.call(
+                        "copyMessage", chat_id=channel_id,
+                        from_chat_id=int(str(doc["source"]).strip()),
+                        message_id=int(str(doc["src_msg_id"]).strip()))
+                    mid = cp["message_id"]
+                    original = bots.call(
+                        "editMessageCaption", chat_id=channel_id,
+                        message_id=mid, caption=caption)
+                    if original.get("photo"):
+                        bots.call("editMessageReplyMarkup",
+                                  chat_id=channel_id, message_id=mid,
+                                  reply_markup=markup)
+                        bots.call("deleteMessage", chat_id=channel_id,
+                                  message_id=pid)
+                        migrated.update_one({"_id": doc["_id"]}, {"$set": {
+                            "post_id": mid, "button_id": mid,
+                            "media_kind": "photo", "caption": caption,
+                            "reposted_at": time.time()}})
+                        return {"id": str(doc["_id"]), "ok": True,
+                                "old": pid, "new": mid,
+                                "source": f"{doc['source']}:{doc['src_msg_id']}",
+                                "title": _range_title(doc, files)}
+                    notes.append("source message is not a photo")
+                    bots.call("deleteMessage", chat_id=channel_id,
+                              message_id=mid)
+                except Exception as exc:
+                    notes.append(str(exc)[:140])
             media = shown.get("video") or shown.get("document") or \
                 shown.get("animation") or {}
             thumb = media.get("thumbnail") or media.get("thumb")
@@ -504,9 +534,11 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             docs = list(migrated.find(q).sort("post_id", 1).limit(limit))
             results = []
             photo_override = request.args.get("photo")
+            from_source = request.args.get("source") == "1"
             for d in docs:
                 try:
-                    results.append(fix_video_post(d, photo_override))
+                    results.append(fix_video_post(d, photo_override,
+                                                  from_source))
                 except Exception as exc:
                     results.append({"id": str(d["_id"]), "ok": False,
                                     "why": str(exc)[:200]})
