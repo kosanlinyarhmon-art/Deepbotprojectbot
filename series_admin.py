@@ -361,6 +361,53 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             query["post_id"] = {"$gt": after}
         series_only = request.args.get("mode", "") == "series"
 
+        if action == "inspect":
+            """Prove one post really has a poster AND a bottom deep-link button."""
+            pid = int(request.args.get("post") or 0)
+            doc = migrated.find_one({"post_id": pid}) or \
+                migrated.find_one({"post_id": str(pid)})
+            if not doc:
+                return jsonify({"ok": False, "error": "post not in DB"}), 404
+            files = files_of(doc.get("payload")) if doc.get("payload") else []
+            caption = _caption(doc, files)
+            markup = _keyboard(doc.get("payload"), bots.username(),
+                               other_channels, music_link)
+            info = {"id": str(doc["_id"]), "post": pid,
+                    "title": _range_title(doc, files),
+                    "files": len(files)}
+            try:
+                shown = bots.call("editMessageCaption", chat_id=channel_id,
+                                  message_id=pid, caption=caption)
+                info["media"] = ("photo" if shown.get("photo") else
+                                 ",".join(k for k in ("video", "document",
+                                                      "animation", "audio")
+                                          if shown.get(k)) or "?")
+                info["caption"] = (shown.get("caption") or "")[:120]
+            except Exception as exc:
+                info["caption_error"] = str(exc)
+            if request.args.get("apply") == "1":
+                # Two edits force Telegram to hand back the whole message both
+                # times, so the buttons can actually be read, not assumed.
+                temp = {"inline_keyboard": markup["inline_keyboard"] + [[
+                    {"text": "🔄", "url": f"https://t.me/{bots.username()}"}]]}
+                try:
+                    a = bots.call("editMessageReplyMarkup", chat_id=channel_id,
+                                  message_id=pid, reply_markup=temp)
+                    b = bots.call("editMessageReplyMarkup", chat_id=channel_id,
+                                  message_id=pid, reply_markup=markup)
+                    def rows(msg):
+                        if not isinstance(msg, dict):
+                            return "not modified"
+                        return [[bt.get("text") for bt in row] for row in
+                                (msg.get("reply_markup") or {}).get("inline_keyboard", [])]
+                    info["buttons_before"] = rows(a)
+                    info["buttons_after"] = rows(b)
+                    info["poster_after"] = bool((b or {}).get("photo")) \
+                        if isinstance(b, dict) else None
+                except Exception as exc:
+                    info["markup_error"] = str(exc)
+            return jsonify({"ok": True, "info": info})
+
         if action == "summary":
             items = [summarise(d, with_caption=False)
                      for d in migrated.find(query)]
