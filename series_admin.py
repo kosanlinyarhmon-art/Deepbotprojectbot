@@ -386,12 +386,12 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
         if not isinstance(shown, dict):
             return {"id": str(doc["_id"]), "ok": False,
                     "why": "could not read the current post"}
+        notes = []
         try:
             if shown.get("photo"):
                 return {"id": str(doc["_id"]), "ok": True, "post": pid,
                         "already_photo": True}
             if use_source and doc.get("source") and doc.get("src_msg_id"):
-                notes = []
                 try:
                     cp = bots.call(
                         "copyMessage", chat_id=channel_id,
@@ -426,8 +426,8 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             source = photo_id or (thumb or {}).get("file_id")
             if not source:
                 return {"id": str(doc["_id"]), "ok": False,
-                        "why": "no poster photo available"}
-            sent = bots.raw(token, "sendPhoto", {
+                        "why": "no poster photo available", "notes": notes}
+            sent = bots.raw(token, "sendPhoto", **{
                 "chat_id": channel_id, "photo": source,
                 "caption": caption})
             new_id = sent["message_id"]
@@ -439,7 +439,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                     pass
                 return {"id": str(doc["_id"]), "ok": False,
                         "why": "replacement is not a photo"}
-            bots.raw(token, "editMessageReplyMarkup", {
+            bots.raw(token, "editMessageReplyMarkup", **{
                 "chat_id": channel_id, "message_id": new_id,
                 "reply_markup": markup})
             bots.call("deleteMessage", chat_id=channel_id, message_id=pid)
@@ -448,7 +448,8 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 "media_kind": "photo", "caption": caption,
                 "reposted_at": time.time()}})
             return {"id": str(doc["_id"]), "ok": True, "old": pid,
-                    "new": new_id, "title": _range_title(doc, files)}
+                    "new": new_id, "title": _range_title(doc, files),
+                    "notes": notes}
         except Exception:
             # Never leave the temporary test button behind on the old post.
             try:
