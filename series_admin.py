@@ -450,14 +450,16 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             return {"id": str(doc["_id"]), "ok": True, "old": pid,
                     "new": new_id, "title": _range_title(doc, files),
                     "notes": notes}
-        except Exception:
+        except Exception as exc:
             # Never leave the temporary test button behind on the old post.
             try:
                 bots.call("editMessageReplyMarkup", chat_id=channel_id,
                           message_id=pid, reply_markup=markup)
             except Exception:
                 pass
-            raise
+            app.logger.warning("series fix %s failed: %s notes=%s",
+                               doc["_id"], exc, notes)
+            raise RuntimeError(f"{exc} | notes={notes}") from None
 
     @app.route("/admin/series")
     def _admin_series():
@@ -482,13 +484,15 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 return jsonify({"ok": False, "error": "apply=1 required"})
             from_chat = int(request.args.get("chat") or
                             str(db_channel_id or "").strip() or channel_id)
+            to_chat = int(request.args.get("to") or
+                          str(db_channel_id or "").strip() or from_chat)
             ids = [int(x) for x in request.args.get("ids", "").split(",")
                    if x.strip().isdigit()]
             out = []
             for mid in ids:
                 rec = {"id": mid}
                 try:
-                    cp = bots.call("copyMessage", chat_id=from_chat,
+                    cp = bots.call("copyMessage", chat_id=to_chat,
                                    from_chat_id=from_chat, message_id=mid)
                     new = cp["message_id"]
                 except Exception as exc:
@@ -499,7 +503,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                     temp = {"inline_keyboard": [[{
                         "text": "🔄", "url": f"https://t.me/{bots.username()}"}]]}
                     shown = bots.call("editMessageReplyMarkup",
-                                      chat_id=from_chat, message_id=new,
+                                      chat_id=to_chat, message_id=new,
                                       reply_markup=temp)
                     rec["media"] = ("photo" if shown.get("photo") else
                                     ",".join(k for k in ("video", "document",
@@ -512,7 +516,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 except Exception as exc:
                     rec["error"] = str(exc)[:120]
                 try:
-                    bots.call("deleteMessage", chat_id=from_chat,
+                    bots.call("deleteMessage", chat_id=to_chat,
                               message_id=new)
                 except Exception:
                     pass
