@@ -465,14 +465,17 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                     out.append(rec)
                     continue
                 try:
-                    shown = bots.call("editMessageCaption", chat_id=from_chat,
-                                      message_id=new,
-                                      caption=f"probe {mid} {time.time()}")
+                    temp = {"inline_keyboard": [[{
+                        "text": "🔄", "url": f"https://t.me/{bots.username()}"}]]}
+                    shown = bots.call("editMessageReplyMarkup",
+                                      chat_id=from_chat, message_id=new,
+                                      reply_markup=temp)
                     rec["media"] = ("photo" if shown.get("photo") else
                                     ",".join(k for k in ("video", "document",
                                                          "animation", "audio",
                                                          "text") if shown.get(k))
                                     or "?")
+                    rec["caption"] = (shown.get("caption") or "")[:110]
                     if shown.get("photo"):
                         rec["photo_file_id"] = shown["photo"][-1]["file_id"]
                 except Exception as exc:
