@@ -174,8 +174,19 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
 
         new_id = None
         kind = None
+        # First choice: copy the post onto itself. This keeps the exact media
+        # the channel already shows (poster / album) and gives a fresh message
+        # that can be edited even after the 48-hour edit window.
+        if pid:
+            try:
+                msg = _api(token, "copyMessage", chat_id=channel_id,
+                           from_chat_id=channel_id, message_id=pid)
+                new_id = msg["message_id"]
+                kind = "photo" if msg.get("photo") else "other"
+            except Exception as exc:
+                app.logger.warning("series self-copy failed %s: %s", pid, exc)
         db_id = doc.get("db_post_id")
-        if db_channel_id and db_id:
+        if new_id is None and db_channel_id and db_id:
             try:
                 msg = _api(token, "copyMessage", chat_id=channel_id,
                            from_chat_id=int(str(db_channel_id).strip()),
@@ -195,33 +206,36 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
         if new_id is None:
             return {"id": str(doc["_id"]), "ok": False, "why": "no poster"}
         if kind != "photo":
-            # The DB-channel message was not the poster: undo and keep the old
-            # post. A series post must have a poster image.
+            # The source message was not a photo: undo and keep the old post.
+            # A series post must have a poster image.
             try:
                 _api(token, "deleteMessage", chat_id=channel_id,
                      message_id=new_id)
             except Exception:
                 pass
             return {"id": str(doc["_id"]), "ok": False,
-                    "why": "db message is not a photo"}
+                    "why": "source message is not a photo"}
 
         try:
             _api(token, "editMessageCaption", chat_id=channel_id,
                  message_id=new_id, caption=caption)
         except Exception as exc:
-            app.logger.warning("series caption edit failed %s: %s", new_id, exc)
+            if "not modified" not in str(exc):
+                app.logger.warning("series caption edit failed %s: %s",
+                                   new_id, exc)
         try:
             _api(token, "editMessageReplyMarkup", chat_id=channel_id,
                  message_id=new_id, reply_markup=markup)
         except Exception as exc:
-            app.logger.warning("series markup failed %s: %s", new_id, exc)
-            try:
-                _api(token, "deleteMessage", chat_id=channel_id,
-                     message_id=new_id)
-            except Exception:
-                pass
-            return {"id": str(doc["_id"]), "ok": False,
-                    "why": f"markup failed: {exc}"}
+            if "not modified" not in str(exc):
+                app.logger.warning("series markup failed %s: %s", new_id, exc)
+                try:
+                    _api(token, "deleteMessage", chat_id=channel_id,
+                         message_id=new_id)
+                except Exception:
+                    pass
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": f"markup failed: {exc}"}
 
         deleted = []
         for old in (pid, btn):
@@ -249,10 +263,17 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
         try:
             _api(token, "editMessageCaption", chat_id=channel_id,
                  message_id=pid, caption=caption)
+        except Exception as exc:
+            if "not modified" not in str(exc):
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": f"caption: {exc}"}
+        try:
             _api(token, "editMessageReplyMarkup", chat_id=channel_id,
                  message_id=pid, reply_markup=markup)
         except Exception as exc:
-            return {"id": str(doc["_id"]), "ok": False, "why": str(exc)}
+            if "not modified" not in str(exc):
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": f"markup: {exc}"}
         migrated.update_one({"_id": doc["_id"]},
                             {"$set": {"button_id": pid, "caption": caption}})
         return {"id": str(doc["_id"]), "ok": True, "post": pid,
@@ -324,7 +345,9 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
                     # Already ONE post: fix the caption and buttons in place.
                     res = fix_photo(d)
                     if not res.get("ok"):
+                        err = res.get("why")
                         res = rebuild(d)
+                        res["fix_error"] = err
                     results.append(res)
                 else:
                     results.append(rebuild(d))
