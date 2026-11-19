@@ -217,6 +217,16 @@ try:
 except Exception as _series_admin_err:  # never block the bot on this helper
     logger.error("series admin routes not registered: %s", _series_admin_err)
 
+# Cloud rebuild worker: driven entirely from MongoDB (session + on/off switch),
+# so it keeps running while the admin's PC is switched off.  UptimeRobot pings
+# /status to keep this Render service awake.
+try:
+    import series_cloud_worker
+    series_cloud_worker.start(db)
+    logger.info("series cloud worker thread started")
+except Exception as _worker_err:  # never block the bot on this helper
+    logger.error("series cloud worker not started: %s", _worker_err)
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 

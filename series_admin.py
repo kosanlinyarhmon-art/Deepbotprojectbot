@@ -695,4 +695,21 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                         "next_after": docs[-1].get("post_id") if docs else None,
                         "results": results})
 
+    @app.route("/admin/worker", methods=["GET", "POST"])
+    def _admin_worker():
+        """Configure / inspect the cloud user-account rebuild worker."""
+        body = request.get_json(silent=True) or {}
+        if ((request.args.get("key") or body.get("key")) != admin_key):
+            return jsonify({"ok": False, "error": "forbidden"}), 403
+        cfg = mongo_db["worker_config"]
+        if request.method == "POST":
+            if body.get("session"):
+                cfg.update_one({"_id": "USER_SESSION"},
+                               {"$set": {"value": body["session"]}}, upsert=True)
+            if "enabled" in body:
+                cfg.update_one({"_id": "REBUILD_ENABLED"},
+                               {"$set": {"value": bool(body["enabled"])}}, upsert=True)
+        from series_cloud_worker import status as worker_status
+        return jsonify({"ok": True, "status": worker_status(mongo_db)})
+
     return app
