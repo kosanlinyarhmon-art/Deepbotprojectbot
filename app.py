@@ -75,6 +75,9 @@ LIVE = {
     "bots": {},
 }
 
+# Last few updates with their text, so /status can explain "no reply" cases.
+RECENT_UPDATES = collections.deque(maxlen=15)
+
 
 async def _hb(update, context):
     """Middleware-style counter so /status can prove polling is alive."""
@@ -89,6 +92,18 @@ async def _hb(update, context):
         if b is not None:
             b["updates"] = b.get("updates", 0) + 1
             b["last_update"] = LIVE["last_update"]
+        m = update.message
+        RECENT_UPDATES.append({
+            "id": update.update_id,
+            "bot": str(context.bot.id),
+            "chat": getattr(update.effective_chat, "id", None),
+            "user": getattr(update.effective_user, "id", None),
+            "fwd": bool(m and (m.forward_origin or m.forward_from_chat)),
+            "photo": bool(m and m.photo),
+            "video": bool(m and (m.video or m.document)),
+            "text": ((m.text or m.caption or "") if m else "")[:60],
+            "at": int(time.time()),
+        })
     except Exception:
         pass
     return None
@@ -118,6 +133,7 @@ def status():
         "mongo": "?",
         "forwarder": {},
         "cleanup": (db["config"].find_one({"_id": "cleanup"}) or {}),
+        "recent_updates": list(RECENT_UPDATES),
         "logs": logs,
     }
     try:
@@ -2038,7 +2054,10 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
         return
     try:
         import cloud_forwarder as _cf
-        hold = _cf.paused()
+        # Only suppress publishing while the forwarder itself is running. When
+        # it is stopped, photos/files the admin forwards by hand must still
+        # publish - that is how a post is made manually.
+        hold = _cf.paused() and _cf.running()
     except Exception:
         hold = False
     if hold:
@@ -4625,7 +4644,8 @@ def build_application(token):
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_video_after_caption)
             ],
         },
-        fallbacks=[CommandHandler('cancel', cancel_newpost)],
+        fallbacks=[CommandHandler('cancel', cancel_newpost),
+                   CommandHandler('newpost', newpost_start)],
     )
 
     batchlink_handler = ConversationHandler(
@@ -4637,7 +4657,8 @@ def build_application(token):
             CommandHandler('done', batch_done)
         ],
         },
-        fallbacks=[CommandHandler('cancel', batch_cancel)],
+        fallbacks=[CommandHandler('cancel', batch_cancel),
+                   CommandHandler('newpost', newpost_start)],
     )
 
     application.add_handler(CommandHandler("start", start))

@@ -76,6 +76,11 @@ def paused():
     return bool(config().get("paused"))
 
 
+def running():
+    """True while the forwarder thread is actually scanning sources."""
+    return bool(_task is not None and _task.is_alive())
+
+
 def state_col():
     return _db()["forward_state"]
 
