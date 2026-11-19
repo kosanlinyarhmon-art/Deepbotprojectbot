@@ -67,6 +67,15 @@ def set_config(**fields):
                                {"$set": fields}, upsert=True)
 
 
+def paused():
+    """True when /forwardstop was pressed: stop forwarding immediately.
+
+    ``enabled`` is re-set to True by the scan loop itself, so the pause needs
+    its own flag - otherwise a restart or the next loop iteration resumes.
+    """
+    return bool(config().get("paused"))
+
+
 def state_col():
     return _db()["forward_state"]
 
@@ -118,7 +127,7 @@ async def drain(sent, started, per_item):
     if sent <= 0:
         return
     target = started + sent * per_item + 90
-    while not _stop:
+    while not _stop and not paused():
         remain = target - time.time()
         if remain <= 0:
             return
@@ -183,7 +192,7 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay,
         await asyncio.sleep(max(min_delay, per_item * len(ids)))
 
     async for msg in client.iter_messages(source, min_id=last_id, reverse=True):
-        if _stop:
+        if _stop or paused():
             break
         if isinstance(msg, MessageService):
             continue
@@ -202,7 +211,7 @@ async def forward_channel(client, bot, raw_source, per_item, min_delay,
         await flush()
 
     await flush()
-    if not _stop:
+    if not _stop and not paused():
         log(f"== FORWARDED ALL {title} ({sent} msgs) - draining")
         await drain(sent, chan_started, per_item)
         if watch:
@@ -269,7 +278,7 @@ async def forward_hub(client, bot, raw_hub, per_item, min_delay, watch=False):
             await asyncio.sleep(max(min_delay, per_item * len(ids) / 2))
 
     async for msg in client.iter_messages(hub, min_id=last_id, reverse=True):
-        if _stop:
+        if _stop or paused():
             break
         text = msg.message or ""
         targets = []
@@ -330,7 +339,7 @@ async def forward_hub(client, bot, raw_hub, per_item, min_delay, watch=False):
                 pass
             joined.discard(ch_id)
 
-    if not _stop:
+    if not _stop and not paused():
         if watch:
             state_col().update_one(
                 {"_id": key},
@@ -395,18 +404,21 @@ async def _run():
     # 24/7: keep the userbot connected and re-scan for new posts. Reconnecting
     # every few minutes would force a fresh session login each time.
     while not _stop:
+        if paused():
+            log("paused by /forwardstop - stopping")
+            break
         hubs = config().get("hubs") or DEFAULT_HUBS
         for hub in hubs:
-            if _stop:
+            if _stop or paused():
                 break
             await forward_hub(client, bot, hub, per_item, min_delay, watch)
 
         for src in (config().get("sources") or DEFAULT_SOURCES):
-            if _stop:
+            if _stop or paused():
                 break
             await forward_channel(client, bot, src, per_item, min_delay, watch)
 
-        if _stop:
+        if _stop or paused():
             break
         if not watch:
             log("all channels finished")
@@ -415,7 +427,11 @@ async def _run():
         interval = int(config().get("watch_interval") or 300)
         set_config(enabled=True, watching=True, last_scan=time.time())
         log(f"scan finished - watching for new posts (next scan in {interval}s)")
-        await asyncio.sleep(interval)
+        # interruptible wait: /forwardstop must take effect within seconds
+        waited = 0
+        while (waited < interval and not _stop and not paused()):
+            await asyncio.sleep(2)
+            waited += 2
 
     await client.disconnect()
     _client = None
@@ -430,7 +446,7 @@ def main_thread():
             asyncio.run(_run())
         except Exception as exc:
             logger.exception("forwarder crashed: %s", exc)
-        if _stop or not config().get("enabled"):
+        if _stop or paused() or not config().get("enabled"):
             return
         time.sleep(30)
 
@@ -440,6 +456,8 @@ def start_in_background():
     global _task
     import threading
     if _task and _task.is_alive():
+        return False
+    if paused():
         return False
     cfg = config()
     if not (cfg.get("enabled") or cfg.get("watch", True)):

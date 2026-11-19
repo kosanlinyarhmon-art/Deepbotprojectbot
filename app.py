@@ -2035,6 +2035,30 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
                        series_key=None, src=None):
     if not AUTO_PUBLISH_CHANNEL or not items:
         return
+    try:
+        import cloud_forwarder as _cf
+        hold = _cf.paused()
+    except Exception:
+        hold = False
+    if hold:
+        # /forwardstop: keep the batch buffered instead of publishing it.
+        now = time.monotonic()
+        entry = _mig_albums.get(key)
+        if not entry:
+            entry = {
+                "items": [], "started": now, "chat_id": None,
+                "src": src, "series": series_key,
+                "quiet": (MIG_QUIET_SERIES if series_key
+                          else MIG_QUIET_PERIOD),
+            }
+            _mig_albums[key] = entry
+        entry["items"].extend(items)
+        entry["last_update"] = now
+        _cancel_mig_task(entry)
+        entry["task"] = context.application.create_task(
+            _mig_flush_later(context, key))
+        logger.info("paused: holding %d item(s) for %s", len(items), key)
+        return
     async with _MIG_PUBLISH_LOCK:
         await _mig_publish_locked(context, key, items, series_key, src)
 
@@ -2795,7 +2819,7 @@ async def forwardstart_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("⚠️ /setsession <string> အရင်လုပ်ပါ။")
         return
     args = context.args or []
-    cloud_forwarder.set_config(enabled=True, watch=True)
+    cloud_forwarder.set_config(enabled=True, watch=True, paused=False)
     # /forwardstart <channel_id> <last_id>  -> reset one channel
     # /forwardstart <last_id>              -> reset the first channel
     if len(args) >= 2 and args[0].lstrip("-").isdigit() and args[1].isdigit():
@@ -3596,6 +3620,14 @@ async def _repair_once(bot):
     """Clean up the whole backlog right after a deploy, in small batches."""
     await asyncio.sleep(40)
     try:
+        import cloud_forwarder as _cf
+        cfg = db["config"].find_one({"_id": "forwarder"}) or {}
+        if _cf.paused() or not cfg.get("enabled"):
+            logger.info("repair once skipped - forwarder paused")
+            return
+    except Exception:
+        pass
+    try:
         await _cleanup_once(bot)
     except Exception as exc:
         logger.warning("cleanup once failed: %s", exc)
@@ -3627,7 +3659,7 @@ async def _seriesmerge_loop(bot):
     while True:
         try:
             cfg = db["config"].find_one({"_id": "forwarder"}) or {}
-            on = bool(cfg.get("enabled"))
+            on = bool(cfg.get("enabled")) and not bool(cfg.get("paused"))
             if on or was:
                 g, m, d, f, r = await _seriesmerge(bot)
                 if m or d or r:
@@ -3681,7 +3713,7 @@ async def forwardstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as exc:
         await update.message.reply_text(f"⚠️ {exc}")
         return
-    cloud_forwarder.set_config(enabled=False, watch=False)
+    cloud_forwarder.set_config(enabled=False, watch=False, paused=True)
     cloud_forwarder.stop()
     await update.message.reply_text("⏹️ Cloud forwarder ရပ်နေပါပြီ။")
 
