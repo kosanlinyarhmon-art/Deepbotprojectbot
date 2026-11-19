@@ -37,6 +37,10 @@ _TITLE_MARK = re.compile(
     r"|\s*[\(\[]?\s*\b(?:ep|episode|e)\s*\.?\s*\d{1,3}(?:\s*[-–~]\s*\d{1,3})*\s*[\)\]]?"
 )
 _NOISE = re.compile(r"(?i)\b(?:complete|completed|end|final|full|all)\b")
+_CREDIT = re.compile(
+    r"(?i)\b(?:mm\s*sub|mmsub|mmsu|crd|credit|credits|myintmyatthu|"
+    r"upload\s*by|encoded\s*by|powered\s*by|channel\s*x)\b"
+)
 _ZW = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 
 
@@ -56,6 +60,7 @@ def _api(token, method, **params):
 
 def _clean_title(raw):
     t = _ZW.sub("", raw or "").strip()
+    t = _CREDIT.sub(" ", t)
     t = _TITLE_MARK.sub(" ", t)
     t = _NOISE.sub(" ", t)
     t = re.sub(r"[\(\)\[\]]+", " ", t)
@@ -145,8 +150,11 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
             "seasons": doc.get("seasons"),
             "eps": doc.get("eps"),
             "files": len(files),
+            "series": _files_have_episodes(files)
+                      or len(doc.get("seasons") or []) > 1,
             "poster": bool(doc.get("poster_file_id") or doc.get("db_post_id")),
             "synopsis_len": len(doc.get("synopsis") or ""),
+            "sample": [f.get("file_name") or "" for f in files[:4]],
         }
         if with_caption:
             item["new_title"] = _range_title(doc, files)
@@ -185,18 +193,17 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
             except Exception as exc:
                 app.logger.warning("series sendPhoto failed: %s", exc)
         if new_id is None:
-            f = next((x for x in files if x.get("file_id")), None)
-            if not f:
-                return {"id": str(doc["_id"]), "ok": False,
-                        "why": "no poster and no file"}
+            return {"id": str(doc["_id"]), "ok": False, "why": "no poster"}
+        if kind != "photo":
+            # The DB-channel message was not the poster: undo and keep the old
+            # post. A series post must have a poster image.
             try:
-                msg = _api(token, "sendDocument", chat_id=channel_id,
-                           document=f["file_id"], caption=caption)
-                new_id = msg["message_id"]
-                kind = "other"
-            except Exception as exc:
-                return {"id": str(doc["_id"]), "ok": False,
-                        "why": f"send failed: {exc}"}
+                _api(token, "deleteMessage", chat_id=channel_id,
+                     message_id=new_id)
+            except Exception:
+                pass
+            return {"id": str(doc["_id"]), "ok": False,
+                    "why": "db message is not a photo"}
 
         try:
             _api(token, "editMessageCaption", chat_id=channel_id,
@@ -265,31 +272,60 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
                  "payload": {"$exists": True}}
         if after:
             query["post_id"] = {"$gt": after}
+        series_only = request.args.get("mode", "") == "series"
+
+        if action == "summary":
+            items = [summarise(d, with_caption=False)
+                     for d in migrated.find(query)]
+            if series_only:
+                items = [i for i in items if i["series"]]
+            return jsonify({
+                "ok": True,
+                "total": len(items),
+                "real_series": sum(1 for i in items if i["series"]),
+                "no_button": sum(1 for i in items if not i["button_id"]),
+                "split_post": sum(1 for i in items if i["button_id"]
+                                  and i["post_id"]
+                                  and int(i["button_id"]) != int(i["post_id"])),
+                "no_poster": sum(1 for i in items if not i["poster"]),
+                "no_synopsis": sum(1 for i in items if not i["synopsis_len"]),
+                "items": items[:limit],
+            })
 
         if action == "report":
             docs = list(migrated.find(query).sort("post_id", 1).limit(limit))
-            return jsonify({"ok": True, "count": len(docs),
-                            "items": [summarise(d) for d in docs]})
+            items = [summarise(d) for d in docs]
+            if series_only:
+                items = [i for i in items if i["series"]]
+            return jsonify({"ok": True, "count": len(items), "items": items})
 
         if action != "fix":
             return jsonify({"ok": False, "error": "unknown action"}), 400
 
         if request.args.get("apply") != "1":
             docs = list(migrated.find(query).sort("post_id", 1).limit(limit))
-            return jsonify({"ok": True, "dry_run": True,
-                            "items": [summarise(d) for d in docs]})
+            items = [summarise(d) for d in docs]
+            if series_only:
+                items = [i for i in items if i["series"]]
+            return jsonify({"ok": True, "dry_run": True, "items": items})
 
         docs = list(migrated.find(query).sort("post_id", 1).limit(limit))
         results = []
         for d in docs:
             pid = d.get("post_id")
             btn = d.get("button_id")
+            if series_only and not (summarise(d, False)["series"]):
+                continue
             if only_bad and pid and btn and int(btn) == int(pid) \
                     and d.get("media_kind") == "photo":
                 continue
             try:
-                if d.get("media_kind") == "photo" and pid:
-                    results.append(fix_photo(d))
+                if pid and btn and int(btn) == int(pid):
+                    # Already ONE post: fix the caption and buttons in place.
+                    res = fix_photo(d)
+                    if not res.get("ok"):
+                        res = rebuild(d)
+                    results.append(res)
                 else:
                     results.append(rebuild(d))
             except Exception as exc:
