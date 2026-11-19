@@ -87,18 +87,36 @@ class _Bots:
         """Return (result, token) — file ids only work with the same token."""
         last = None
         for token, _user in self.pairs:
-            try:
-                return _api_one(token, method, params), token
-            except Exception as exc:
-                last = exc
-                low = str(exc).lower()
-                if any(marker in low for marker in _RETRY):
-                    continue
-                raise
+            for attempt in range(3):
+                try:
+                    return _api_one(token, method, params), token
+                except Exception as exc:
+                    last = exc
+                    low = str(exc).lower()
+                    if "too many requests" in low and attempt < 2:
+                        wait = re.search(r"retry after (\d+)", low)
+                        time.sleep(int(wait.group(1)) + 1 if wait else 5)
+                        continue
+                    if any(marker in low for marker in _RETRY):
+                        break
+                    raise
         raise last or RuntimeError("no bot token configured")
 
     def call(self, method, **params):
         return self.call_token(method, **params)[0]
+
+    def raw(self, token, method, **params):
+        """Same retry rules, but pinned to one token (for its own file ids)."""
+        for attempt in range(3):
+            try:
+                return _api_one(token, method, params)
+            except Exception as exc:
+                low = str(exc).lower()
+                if "too many requests" in low and attempt < 2:
+                    wait = re.search(r"retry after (\d+)", low)
+                    time.sleep(int(wait.group(1)) + 1 if wait else 5)
+                    continue
+                raise
 
     def username(self):
         if not self._username:
@@ -379,7 +397,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             if not source:
                 return {"id": str(doc["_id"]), "ok": False,
                         "why": "no poster photo available"}
-            sent = _api_one(token, "sendPhoto", {
+            sent = bots.raw(token, "sendPhoto", {
                 "chat_id": channel_id, "photo": source,
                 "caption": caption})
             new_id = sent["message_id"]
@@ -391,7 +409,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                     pass
                 return {"id": str(doc["_id"]), "ok": False,
                         "why": "replacement is not a photo"}
-            _api_one(token, "editMessageReplyMarkup", {
+            bots.raw(token, "editMessageReplyMarkup", {
                 "chat_id": channel_id, "message_id": new_id,
                 "reply_markup": markup})
             bots.call("deleteMessage", chat_id=channel_id, message_id=pid)
@@ -465,7 +483,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 except Exception:
                     pass
                 out.append(rec)
-                time.sleep(0.3)
+                time.sleep(1.2)
             return jsonify({"ok": True, "items": out})
 
         if action == "fixposter":
