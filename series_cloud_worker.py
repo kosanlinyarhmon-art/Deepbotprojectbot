@@ -270,7 +270,7 @@ async def run_all(db):
              "payload": {"$exists": True}}
     try:
         while cfg.find_one({"_id": "REBUILD_ENABLED", "value": True}):
-            docs = list(db["migrated_posts"].find(query).sort("post_id", 1).limit(600))
+            docs = list(db["migrated_posts"].find(query).sort("post_id", -1).limit(600))
             todo = [d for d in docs if str(d["_id"]) not in done]
             if not todo:
                 LOG.info("series worker: everything done, idling")
@@ -321,6 +321,9 @@ def status(db):
         "recent": [{"title": r.get("title"), "new": r.get("new"),
                     "files": r.get("files"), "ts": r.get("ts")}
                    for r in progress.find({"ok": True}).sort("ts", -1).limit(10)],
+        "recent_failed": [{"title": r.get("title"), "why": r.get("why"),
+                           "ts": r.get("ts")}
+                          for r in progress.find({"ok": False}).sort("ts", -1).limit(10)],
     }
 
 
