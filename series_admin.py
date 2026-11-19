@@ -374,7 +374,11 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                                other_channels, music_link)
             info = {"id": str(doc["_id"]), "post": pid,
                     "title": _range_title(doc, files),
-                    "files": len(files)}
+                    "files": len(files),
+                    "fields": {k: str(v)[:100] for k, v in doc.items()
+                               if k in ("poster_file_id", "db_post_id",
+                                        "payload", "media_kind", "src",
+                                        "series_key")}}
             try:
                 shown = bots.call("editMessageCaption", chat_id=channel_id,
                                   message_id=pid, caption=caption)
