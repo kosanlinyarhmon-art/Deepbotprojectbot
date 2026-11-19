@@ -14,6 +14,9 @@ ONE post, ONE poster, ONE deep link that holds every file.
 
 The report is read-only.  Nothing is changed without ``apply=1`` and nothing is
 deleted until the replacement post exists and has its buttons.
+
+Posts in the channel were made by more than one bot token, and a bot can only
+edit its own messages, so every call is tried with each configured token.
 """
 
 import json
@@ -44,8 +47,14 @@ _CREDIT = re.compile(
 )
 _ZW = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 
+# A bot can only touch its own messages; a different token often can.
+_RETRY = ("message_id_invalid", "message to edit not found",
+          "message can't be edited", "message to copy not found",
+          "not enough rights", "chat not found", "message not found",
+          "have no rights", "message_id_invalid")
 
-def _api(token, method, **params):
+
+def _api_one(token, method, params):
     body = json.dumps({k: v for k, v in params.items() if v is not None})
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
@@ -65,6 +74,33 @@ def _api(token, method, **params):
     if not out.get("ok"):
         raise RuntimeError(f"{method}: {out.get('description')}")
     return out["result"]
+
+
+class _Bots:
+    """Try every configured bot token, because each bot owns its own posts."""
+
+    def __init__(self, pairs):
+        self.pairs = [(t, u) for t, u in pairs if t]
+        self._username = ""
+
+    def call(self, method, **params):
+        last = None
+        for token, _user in self.pairs:
+            try:
+                return _api_one(token, method, params)
+            except Exception as exc:
+                last = exc
+                low = str(exc).lower()
+                if any(marker in low for marker in _RETRY):
+                    continue
+                raise
+        raise last or RuntimeError("no bot token configured")
+
+    def username(self):
+        if not self._username:
+            self._username = (self.pairs[0][1] if self.pairs else "") or \
+                (_api_one(self.pairs[0][0], "getMe", {}).get("username") or "")
+        return self._username
 
 
 def _clean_title(raw):
@@ -133,20 +169,18 @@ def _keyboard(payload, username, other_channels, music_link):
     return {"inline_keyboard": rows}
 
 
-def register(app, *, token, mongo_db, channel_id, db_channel_id,
-             bot_username, other_channels, music_link, admin_key):
+def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
+             other_channels, music_link, admin_key):
     """Attach /admin/series to the Flask app."""
     migrated = mongo_db["migrated_posts"]
-    state = {"username": bot_username or ""}
+    bots = _Bots(tokens)
 
     def files_of(payload):
         doc = mongo_db["file_store"].find_one({"payload": payload})
         return (doc or {}).get("files", []) or []
 
-    def username():
-        if not state["username"]:
-            state["username"] = _api(token, "getMe").get("username") or ""
-        return state["username"]
+    def is_modified(exc):
+        return "not modified" in str(exc).lower()
 
     def summarise(doc, with_caption=True):
         files = files_of(doc.get("payload")) if doc.get("payload") else []
@@ -170,88 +204,114 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
             item["new_caption"] = _caption(doc, files)
         return item
 
+    def fix_photo(doc):
+        """The post exists and is the only post: edit caption + buttons."""
+        payload = doc.get("payload")
+        files = files_of(payload) if payload else []
+        caption = _caption(doc, files)
+        markup = _keyboard(payload, bots.username(), other_channels, music_link)
+        pid = int(doc["post_id"])
+        shown = {}
+        try:
+            shown = bots.call("editMessageCaption", chat_id=channel_id,
+                              message_id=pid, caption=caption) or {}
+        except Exception as exc:
+            if not is_modified(exc):
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": f"caption: {exc}"}
+        if isinstance(shown, dict) and shown and not shown.get("photo"):
+            kinds = [k for k in ("video", "document", "animation", "audio",
+                                 "text") if shown.get(k)]
+            return {"id": str(doc["_id"]), "ok": False,
+                    "why": "post is not a photo (" + (",".join(kinds) or "?") + ")"}
+        try:
+            bots.call("editMessageReplyMarkup", chat_id=channel_id,
+                      message_id=pid, reply_markup=markup)
+        except Exception as exc:
+            if not is_modified(exc):
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": f"markup: {exc}"}
+        migrated.update_one({"_id": doc["_id"]},
+                            {"$set": {"button_id": pid, "caption": caption,
+                                      "media_kind": "photo"}})
+        return {"id": str(doc["_id"]), "ok": True, "post": pid,
+                "edited": True, "title": _range_title(doc, files)}
+
     def rebuild(doc):
+        """Recreate the post (keeps the media) then delete the old message."""
         payload = doc.get("payload")
         files = files_of(payload) if payload else []
         if not payload or not files:
             return {"id": str(doc["_id"]), "ok": False,
                     "why": "no payload/files"}
         caption = _caption(doc, files)
-        markup = _keyboard(payload, username(), other_channels, music_link)
+        markup = _keyboard(payload, bots.username(), other_channels, music_link)
         pid = int(doc["post_id"]) if doc.get("post_id") else None
         btn = int(doc["button_id"]) if doc.get("button_id") else None
 
-        new_id = None
-        kind = None
-        tries = []
-        seen = []
-        # First choice: copy the post onto itself. This keeps the exact media
-        # the channel already shows (poster / album) and gives a fresh message
-        # that can be edited even after the 48-hour edit window.
+        sources = []
         if pid:
-            tries.append(("self", channel_id, pid))
+            sources.append(("self", channel_id, pid))
         db_id = doc.get("db_post_id")
         if db_channel_id and db_id:
-            tries.append(("db", int(str(db_channel_id).strip()), int(db_id)))
+            sources.append(("db", int(str(db_channel_id).strip()), int(db_id)))
 
-        for label, from_chat, msg_id in tries:
+        # copyMessage only returns a MessageId in Bot API 7+, so the media type
+        # is read from the message that editMessageCaption hands back. That also
+        # proves the copy accepts a caption (i.e. it is not an album).
+        new_id = None
+        media = None
+        notes = []
+        for label, from_chat, msg_id in sources:
             try:
-                msg = _api(token, "copyMessage", chat_id=channel_id,
-                           from_chat_id=from_chat, message_id=msg_id)
+                msg = bots.call("copyMessage", chat_id=channel_id,
+                                from_chat_id=from_chat, message_id=msg_id)
             except Exception as exc:
-                app.logger.warning("series %s copy failed %s: %s",
-                                   label, msg_id, exc)
+                notes.append(f"{label}: {exc}")
                 continue
-            if msg.get("photo"):
-                new_id = msg["message_id"]
-                kind = "photo"
-                break
-            seen.append(f"{label}:" + ",".join(
-                k for k in ("video", "document", "animation", "audio",
-                            "text", "caption") if msg.get(k)))
+            mid = msg["message_id"]
             try:
-                _api(token, "deleteMessage", chat_id=channel_id,
-                     message_id=msg["message_id"])
-            except Exception:
-                pass
-        if new_id is None and doc.get("poster_file_id"):
-            try:
-                msg = _api(token, "sendPhoto", chat_id=channel_id,
-                           photo=doc["poster_file_id"], caption=caption)
-                new_id = msg["message_id"]
-                kind = "photo"
+                shown = bots.call("editMessageCaption", chat_id=channel_id,
+                                  message_id=mid, caption=caption)
             except Exception as exc:
-                app.logger.warning("series sendPhoto failed: %s", exc)
+                if not is_modified(exc):
+                    notes.append(f"{label} caption: {exc}")
+                    try:
+                        bots.call("deleteMessage", chat_id=channel_id,
+                                  message_id=mid)
+                    except Exception:
+                        pass
+                    continue
+                shown = {}
+            if isinstance(shown, dict) and shown.get("photo"):
+                media = "photo"
+            elif isinstance(shown, dict) and shown:
+                kinds = [k for k in ("video", "document", "animation",
+                                     "audio", "text") if shown.get(k)]
+                notes.append(f"{label}: not a photo ({','.join(kinds) or '?'})")
+                try:
+                    bots.call("deleteMessage", chat_id=channel_id,
+                              message_id=mid)
+                except Exception:
+                    pass
+                continue
+            else:
+                media = media or "photo"
+            new_id = mid
+            break
+
         if new_id is None:
             return {"id": str(doc["_id"]), "ok": False,
-                    "why": "no poster photo available", "seen": seen}
-        if kind != "photo":
-            # The source message was not a photo: undo and keep the old post.
-            # A series post must have a poster image.
-            try:
-                _api(token, "deleteMessage", chat_id=channel_id,
-                     message_id=new_id)
-            except Exception:
-                pass
-            return {"id": str(doc["_id"]), "ok": False,
-                    "why": "source message is not a photo"}
+                    "why": "could not recreate the post", "notes": notes}
 
         try:
-            _api(token, "editMessageCaption", chat_id=channel_id,
-                 message_id=new_id, caption=caption)
+            bots.call("editMessageReplyMarkup", chat_id=channel_id,
+                      message_id=new_id, reply_markup=markup)
         except Exception as exc:
-            if "not modified" not in str(exc):
-                app.logger.warning("series caption edit failed %s: %s",
-                                   new_id, exc)
-        try:
-            _api(token, "editMessageReplyMarkup", chat_id=channel_id,
-                 message_id=new_id, reply_markup=markup)
-        except Exception as exc:
-            if "not modified" not in str(exc):
-                app.logger.warning("series markup failed %s: %s", new_id, exc)
+            if not is_modified(exc):
                 try:
-                    _api(token, "deleteMessage", chat_id=channel_id,
-                         message_id=new_id)
+                    bots.call("deleteMessage", chat_id=channel_id,
+                              message_id=new_id)
                 except Exception:
                     pass
                 return {"id": str(doc["_id"]), "ok": False,
@@ -261,43 +321,20 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
         for old in (pid, btn):
             if old and old != new_id:
                 try:
-                    _api(token, "deleteMessage", chat_id=channel_id,
-                         message_id=old)
+                    bots.call("deleteMessage", chat_id=channel_id,
+                              message_id=old)
                     deleted.append(old)
                 except Exception as exc:
                     app.logger.warning("series delete failed %s: %s", old, exc)
 
         migrated.update_one({"_id": doc["_id"]}, {"$set": {
-            "post_id": new_id, "button_id": new_id, "media_kind": kind,
-            "caption": caption, "reposted_at": time.time()}})
+            "post_id": new_id, "button_id": new_id,
+            "caption": caption, "reposted_at": time.time(),
+            **({"media_kind": media} if media else {})}})
         return {"id": str(doc["_id"]), "ok": True, "old": deleted,
-                "new": new_id, "media": kind, "title": _range_title(doc, files)}
-
-    def fix_photo(doc):
-        """Poster already correct: only the caption / buttons need fixing."""
-        payload = doc.get("payload")
-        files = files_of(payload) if payload else []
-        caption = _caption(doc, files)
-        markup = _keyboard(payload, username(), other_channels, music_link)
-        pid = int(doc["post_id"])
-        try:
-            _api(token, "editMessageCaption", chat_id=channel_id,
-                 message_id=pid, caption=caption)
-        except Exception as exc:
-            if "not modified" not in str(exc):
-                return {"id": str(doc["_id"]), "ok": False,
-                        "why": f"caption: {exc}"}
-        try:
-            _api(token, "editMessageReplyMarkup", chat_id=channel_id,
-                 message_id=pid, reply_markup=markup)
-        except Exception as exc:
-            if "not modified" not in str(exc):
-                return {"id": str(doc["_id"]), "ok": False,
-                        "why": f"markup: {exc}"}
-        migrated.update_one({"_id": doc["_id"]},
-                            {"$set": {"button_id": pid, "caption": caption}})
-        return {"id": str(doc["_id"]), "ok": True, "post": pid,
-                "edited": True, "title": _range_title(doc, files)}
+                "new": new_id, "media": media,
+                "title": _range_title(doc, files),
+                "notes": notes}
 
     @app.route("/admin/series")
     def _admin_series():
@@ -355,14 +392,13 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
         for d in docs:
             pid = d.get("post_id")
             btn = d.get("button_id")
-            if series_only and not (summarise(d, False)["series"]):
+            if series_only and not summarise(d, False)["series"]:
                 continue
             if only_bad and pid and btn and int(btn) == int(pid) \
                     and d.get("media_kind") == "photo":
                 continue
             try:
                 if pid and btn and int(btn) == int(pid):
-                    # Already ONE post: fix the caption and buttons in place.
                     res = fix_photo(d)
                     if not res.get("ok"):
                         err = res.get("why")
@@ -374,7 +410,7 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
             except Exception as exc:
                 results.append({"id": str(d["_id"]), "ok": False,
                                 "why": str(exc)[:200]})
-            time.sleep(1.0)
+            time.sleep(0.8)
         return jsonify({"ok": True, "done": len(results), "results": results})
 
     return app

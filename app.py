@@ -205,12 +205,11 @@ try:
     from series_admin import register as _register_series_admin
     _register_series_admin(
         app,
-        token=TOKEN,
+        tokens=_load_token_pairs(),
         mongo_db=db,
         channel_id=int(os.environ.get("PUBLISH_CHANNEL_ID",
                                       "-1003753299714").strip()),
         db_channel_id=DATABASE_CHANNEL_ID,
-        bot_username=BOT_USERNAME,
         other_channels=OTHER_CHANNELS,
         music_link=MUSIC_CHANNEL_LINK,
         admin_key=ADMIN_KEY,
