@@ -83,11 +83,12 @@ class _Bots:
         self.pairs = [(t, u) for t, u in pairs if t]
         self._username = ""
 
-    def call(self, method, **params):
+    def call_token(self, method, **params):
+        """Return (result, token) — file ids only work with the same token."""
         last = None
         for token, _user in self.pairs:
             try:
-                return _api_one(token, method, params)
+                return _api_one(token, method, params), token
             except Exception as exc:
                 last = exc
                 low = str(exc).lower()
@@ -95,6 +96,9 @@ class _Bots:
                     continue
                 raise
         raise last or RuntimeError("no bot token configured")
+
+    def call(self, method, **params):
+        return self.call_token(method, **params)[0]
 
     def username(self):
         if not self._username:
@@ -344,6 +348,67 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 "title": _range_title(doc, files),
                 "notes": notes}
 
+    def fix_video_post(doc):
+        """Replace a rebuilt video post with a real photo (the video thumbnail).
+
+        The migration used the video's own thumbnail as the poster image, so
+        reusing that file id restores the picture in the poster slot without
+        having to re-upload anything or guess at a file name.
+        """
+        pid = int(doc["post_id"])
+        files = files_of(doc.get("payload")) if doc.get("payload") else []
+        caption = _caption(doc, files)
+        markup = _keyboard(doc.get("payload"), bots.username(),
+                           other_channels, music_link)
+        temp = {"inline_keyboard": markup["inline_keyboard"] + [[
+            {"text": "🔄", "url": f"https://t.me/{bots.username()}"}]]}
+        shown, token = bots.call_token(
+            "editMessageReplyMarkup", chat_id=channel_id,
+            message_id=pid, reply_markup=temp)
+        if not isinstance(shown, dict):
+            return {"id": str(doc["_id"]), "ok": False,
+                    "why": "could not read the current post"}
+        try:
+            if shown.get("photo"):
+                return {"id": str(doc["_id"]), "ok": True, "post": pid,
+                        "already_photo": True}
+            media = shown.get("video") or shown.get("document") or \
+                shown.get("animation") or {}
+            thumb = media.get("thumbnail") or media.get("thumb")
+            if not thumb:
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": "no thumbnail on the current media"}
+            sent = _api_one(token, "sendPhoto", {
+                "chat_id": channel_id, "photo": thumb["file_id"],
+                "caption": caption})
+            new_id = sent["message_id"]
+            if not sent.get("photo"):
+                try:
+                    bots.call("deleteMessage", chat_id=channel_id,
+                              message_id=new_id)
+                except Exception:
+                    pass
+                return {"id": str(doc["_id"]), "ok": False,
+                        "why": "replacement is not a photo"}
+            _api_one(token, "editMessageReplyMarkup", {
+                "chat_id": channel_id, "message_id": new_id,
+                "reply_markup": markup})
+            bots.call("deleteMessage", chat_id=channel_id, message_id=pid)
+            migrated.update_one({"_id": doc["_id"]}, {"$set": {
+                "post_id": new_id, "button_id": new_id,
+                "media_kind": "photo", "caption": caption,
+                "reposted_at": time.time()}})
+            return {"id": str(doc["_id"]), "ok": True, "old": pid,
+                    "new": new_id, "title": _range_title(doc, files)}
+        except Exception:
+            # Never leave the temporary test button behind on the old post.
+            try:
+                bots.call("editMessageReplyMarkup", chat_id=channel_id,
+                          message_id=pid, reply_markup=markup)
+            except Exception:
+                pass
+            raise
+
     @app.route("/admin/series")
     def _admin_series():
         if not admin_key or request.args.get("key") != admin_key:
@@ -360,6 +425,30 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
         if after:
             query["post_id"] = {"$gt": after}
         series_only = request.args.get("mode", "") == "series"
+
+        if action == "fixposter":
+            """Replace rebuilt VIDEO posts with a photo in the poster slot."""
+            if request.args.get("apply") != "1":
+                q = {"post_id": {"$gt": int(after or 13559)},
+                     "reposted_at": {"$exists": True}}
+                docs = list(migrated.find(q).sort("post_id", 1).limit(limit))
+                return jsonify({"ok": True, "dry_run": True,
+                                "items": [{"id": str(d["_id"]),
+                                           "post": d.get("post_id")}
+                                          for d in docs]})
+            q = {"post_id": {"$gt": int(after or 13559)},
+                 "reposted_at": {"$exists": True}}
+            docs = list(migrated.find(q).sort("post_id", 1).limit(limit))
+            results = []
+            for d in docs:
+                try:
+                    results.append(fix_video_post(d))
+                except Exception as exc:
+                    results.append({"id": str(d["_id"]), "ok": False,
+                                    "why": str(exc)[:200]})
+                time.sleep(0.6)
+            return jsonify({"ok": True, "done": len(results),
+                            "results": results})
 
         if action == "inspect":
             """Prove one post really has a poster AND a bottom deep-link button."""
