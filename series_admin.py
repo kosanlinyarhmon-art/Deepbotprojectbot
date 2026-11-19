@@ -466,7 +466,8 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
         if not admin_key or request.args.get("key") != admin_key:
             return jsonify({"ok": False, "error": "forbidden"}), 403
         action = request.args.get("action", "report")
-        limit = max(1, min(int(request.args.get("limit", "20")), 50))
+        limit = max(1, min(int(request.args.get("limit", "20")),
+                           500 if action == "allseries" else 50))
         after = int(request.args.get("after", "0") or 0)
         only_bad = request.args.get("only_bad", "0") == "1"
 
@@ -477,6 +478,29 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
         if after:
             query["post_id"] = {"$gt": after}
         series_only = request.args.get("mode", "") == "series"
+
+        if action == "allseries":
+            """List every series doc (including already reposted ones)."""
+            docs = list(migrated.find({
+                "series_key": {"$exists": True},
+                "merged_into": {"$exists": False},
+                "payload": {"$exists": True},
+            }).sort("post_id", 1).limit(limit))
+            items = []
+            for d in docs:
+                files = files_of(d.get("payload")) if d.get("payload") else []
+                items.append({
+                    "id": str(d["_id"]),
+                    "post": d.get("post_id"),
+                    "title": _range_title(d, files),
+                    "source": d.get("source"),
+                    "src_msg_id": d.get("src_msg_id"),
+                    "episodes": d.get("episodes"),
+                    "files": len(files),
+                    "synopsis": (d.get("synopsis") or "")[:400],
+                    "reposted": bool(d.get("reposted_at")),
+                })
+            return jsonify({"ok": True, "count": len(items), "items": items})
 
         if action == "probe":
             """Look inside private DB-channel messages without changing them."""
