@@ -348,7 +348,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 "title": _range_title(doc, files),
                 "notes": notes}
 
-    def fix_video_post(doc):
+    def fix_video_post(doc, photo_id=None):
         """Replace a rebuilt video post with a real photo (the video thumbnail).
 
         The migration used the video's own thumbnail as the poster image, so
@@ -375,11 +375,12 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             media = shown.get("video") or shown.get("document") or \
                 shown.get("animation") or {}
             thumb = media.get("thumbnail") or media.get("thumb")
-            if not thumb:
+            source = photo_id or (thumb or {}).get("file_id")
+            if not source:
                 return {"id": str(doc["_id"]), "ok": False,
-                        "why": "no thumbnail on the current media"}
+                        "why": "no poster photo available"}
             sent = _api_one(token, "sendPhoto", {
-                "chat_id": channel_id, "photo": thumb["file_id"],
+                "chat_id": channel_id, "photo": source,
                 "caption": caption})
             new_id = sent["message_id"]
             if not sent.get("photo"):
@@ -426,6 +427,47 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             query["post_id"] = {"$gt": after}
         series_only = request.args.get("mode", "") == "series"
 
+        if action == "probe":
+            """Look inside private DB-channel messages without changing them."""
+            if request.args.get("apply") != "1":
+                return jsonify({"ok": False, "error": "apply=1 required"})
+            from_chat = int(request.args.get("chat") or
+                            str(db_channel_id or "").strip() or channel_id)
+            ids = [int(x) for x in request.args.get("ids", "").split(",")
+                   if x.strip().isdigit()]
+            out = []
+            for mid in ids:
+                rec = {"id": mid}
+                try:
+                    cp = bots.call("copyMessage", chat_id=from_chat,
+                                   from_chat_id=from_chat, message_id=mid)
+                    new = cp["message_id"]
+                except Exception as exc:
+                    rec["error"] = str(exc)[:120]
+                    out.append(rec)
+                    continue
+                try:
+                    shown = bots.call("editMessageCaption", chat_id=from_chat,
+                                      message_id=new,
+                                      caption=f"probe {mid} {time.time()}")
+                    rec["media"] = ("photo" if shown.get("photo") else
+                                    ",".join(k for k in ("video", "document",
+                                                         "animation", "audio",
+                                                         "text") if shown.get(k))
+                                    or "?")
+                    if shown.get("photo"):
+                        rec["photo_file_id"] = shown["photo"][-1]["file_id"]
+                except Exception as exc:
+                    rec["error"] = str(exc)[:120]
+                try:
+                    bots.call("deleteMessage", chat_id=from_chat,
+                              message_id=new)
+                except Exception:
+                    pass
+                out.append(rec)
+                time.sleep(0.3)
+            return jsonify({"ok": True, "items": out})
+
         if action == "fixposter":
             """Replace rebuilt VIDEO posts with a photo in the poster slot."""
             if request.args.get("apply") != "1":
@@ -440,9 +482,10 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                  "reposted_at": {"$exists": True}}
             docs = list(migrated.find(q).sort("post_id", 1).limit(limit))
             results = []
+            photo_override = request.args.get("photo")
             for d in docs:
                 try:
-                    results.append(fix_video_post(d))
+                    results.append(fix_video_post(d, photo_override))
                 except Exception as exc:
                     results.append({"id": str(d["_id"]), "ok": False,
                                     "why": str(exc)[:200]})
