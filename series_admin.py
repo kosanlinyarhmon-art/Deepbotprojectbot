@@ -19,6 +19,7 @@ deleted until the replacement post exists and has its buttons.
 import json
 import re
 import time
+import urllib.error
 import urllib.request
 
 from flask import jsonify, request
@@ -51,8 +52,16 @@ def _api(token, method, **params):
         data=body.encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        out = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            desc = json.loads(raw).get("description") or raw
+        except Exception:
+            desc = raw
+        raise RuntimeError(f"{method}: {desc}") from None
     if not out.get("ok"):
         raise RuntimeError(f"{method}: {out.get('description')}")
     return out["result"]
@@ -174,27 +183,37 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
 
         new_id = None
         kind = None
+        tries = []
+        seen = []
         # First choice: copy the post onto itself. This keeps the exact media
         # the channel already shows (poster / album) and gives a fresh message
         # that can be edited even after the 48-hour edit window.
         if pid:
-            try:
-                msg = _api(token, "copyMessage", chat_id=channel_id,
-                           from_chat_id=channel_id, message_id=pid)
-                new_id = msg["message_id"]
-                kind = "photo" if msg.get("photo") else "other"
-            except Exception as exc:
-                app.logger.warning("series self-copy failed %s: %s", pid, exc)
+            tries.append(("self", channel_id, pid))
         db_id = doc.get("db_post_id")
-        if new_id is None and db_channel_id and db_id:
+        if db_channel_id and db_id:
+            tries.append(("db", int(str(db_channel_id).strip()), int(db_id)))
+
+        for label, from_chat, msg_id in tries:
             try:
                 msg = _api(token, "copyMessage", chat_id=channel_id,
-                           from_chat_id=int(str(db_channel_id).strip()),
-                           message_id=int(db_id))
-                new_id = msg["message_id"]
-                kind = "photo" if msg.get("photo") else "other"
+                           from_chat_id=from_chat, message_id=msg_id)
             except Exception as exc:
-                app.logger.warning("series copy failed %s: %s", db_id, exc)
+                app.logger.warning("series %s copy failed %s: %s",
+                                   label, msg_id, exc)
+                continue
+            if msg.get("photo"):
+                new_id = msg["message_id"]
+                kind = "photo"
+                break
+            seen.append(f"{label}:" + ",".join(
+                k for k in ("video", "document", "animation", "audio",
+                            "text", "caption") if msg.get(k)))
+            try:
+                _api(token, "deleteMessage", chat_id=channel_id,
+                     message_id=msg["message_id"])
+            except Exception:
+                pass
         if new_id is None and doc.get("poster_file_id"):
             try:
                 msg = _api(token, "sendPhoto", chat_id=channel_id,
@@ -204,7 +223,8 @@ def register(app, *, token, mongo_db, channel_id, db_channel_id,
             except Exception as exc:
                 app.logger.warning("series sendPhoto failed: %s", exc)
         if new_id is None:
-            return {"id": str(doc["_id"]), "ok": False, "why": "no poster"}
+            return {"id": str(doc["_id"]), "ok": False,
+                    "why": "no poster photo available", "seen": seen}
         if kind != "photo":
             # The source message was not a photo: undo and keep the old post.
             # A series post must have a poster image.
