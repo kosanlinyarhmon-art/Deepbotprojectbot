@@ -355,6 +355,7 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
 
         query = {"series_key": {"$exists": True},
                  "merged_into": {"$exists": False},
+                 "reposted_at": {"$exists": False},
                  "payload": {"$exists": True}}
         if after:
             query["post_id"] = {"$gt": after}
