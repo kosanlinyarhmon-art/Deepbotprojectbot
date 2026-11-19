@@ -22,10 +22,15 @@ from telegraph import Telegraph
 
 # ---------- Logging ----------
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
+# The polling loop logs every HTTP call at DEBUG, which buried the useful
+# lines in the /status ring buffer. Keep our own INFO logs, silence the noise.
+for _noisy in ("httpx", "httpcore", "urllib3", "telegram.request",
+               "telegram.ext.ExtBot", "telegram.ext.Application"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ---------- Flask Server ----------
@@ -114,7 +119,7 @@ def status():
     from flask import jsonify
     now = time.time()
     mask = re.compile(r"(bot\d{6,}:)[A-Za-z0-9_-]{30,}")
-    logs = [mask.sub(r"\1***", ln) for ln in list(RING.buf)[-40:]]
+    logs = [mask.sub(r"\1***", ln) for ln in list(RING.buf)[-150:]]
     out = {
         "ok": True,
         "uptime_sec": int(now - BOOT_TS),
@@ -418,6 +423,9 @@ except ValueError:
 if AUTO_PUBLISH_CHANNEL in BLOCKED_CHANNEL_IDS:
     logger.warning("AUTO_PUBLISH_CHANNEL is blocked - migration disabled")
     AUTO_PUBLISH_CHANNEL = 0
+# Public link of the channel, used when reporting a post back to the admin.
+PUBLISH_CHANNEL_LINK = os.environ.get(
+    "PUBLISH_CHANNEL_LINK", "https://t.me/wznmoviescollector").rstrip("/")
 MIGRATE_GAP = float(os.environ.get("MIGRATE_GAP", "3.2"))
 migrated_collection = db["migrated_posts"]
 if SOURCE_CHANNEL_IDS and AUTO_PUBLISH_CHANNEL:
@@ -1640,6 +1648,7 @@ _MIG_EP_MARK = re.compile(
     r"|\bep\s*[\[\(]?\s*\d{1,4}\b"
     r"|\bepisode\s*[\[\(]?\s*\d{1,4}\b"
     r"|\bseason\s*[\[\(]?\s*\d{1,2}\b"
+    r"|\bs\s*[-~]\s*\d{1,2}\b"
     r"|\be\s*\d{1,3}\b"
     r")", re.I)
 _MIG_EP_NOISE = re.compile(
@@ -1657,6 +1666,9 @@ def _mig_series_base(title):
     base = _MIG_EP_MARK.sub(" ", base)
     base = _MIG_EP_NOISE.sub(" ", base)
     base = re.sub(r"[\(\)\[\]\{\}\-_~|]+", " ", base)
+    # "The Vampire Diaries (S -1 to 8)" leaves a lone "S" once the numbers are
+    # gone; drop it so the series matches the existing "The Vampire Diaries".
+    base = re.sub(r"(?i)(?:^|\s)(?:s|season)\s*$", " ", base)
     base = re.sub(r"\s{2,}", " ", base).strip(" .,-")
     return base
 
@@ -2025,6 +2037,40 @@ def _cancel_mig_task(entry):
         task.cancel()
 
 
+_NOTIFY_TS = {}
+
+
+def _post_url(post_id):
+    return f"{PUBLISH_CHANNEL_LINK}/{int(post_id)}" if post_id else ""
+
+
+async def _mig_notify(context: ContextTypes.DEFAULT_TYPE, chat_id, text,
+                      dedupe=""):
+    """Short status line in the admin chat for posts made by hand.
+
+    The cloud forwarder sends through the same account, so talking back while
+    it is running would flood the chat - stay quiet unless it is stopped.
+    """
+    if not chat_id:
+        return
+    try:
+        import cloud_forwarder as _cf
+        if _cf.running():
+            return
+    except Exception:
+        pass
+    now = time.time()
+    if dedupe:
+        if now - _NOTIFY_TS.get((chat_id, dedupe), 0) < 2:
+            return
+        _NOTIFY_TS[(chat_id, dedupe)] = now
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text,
+                                       disable_web_page_preview=True)
+    except Exception as exc:
+        logger.warning("status message failed: %s", exc)
+
+
 async def _mig_flush_later(context: ContextTypes.DEFAULT_TYPE, key: str):
     await asyncio.sleep(MIG_QUIET_PERIOD)
     entry = _mig_albums.get(key)
@@ -2043,13 +2089,16 @@ async def _mig_flush_later(context: ContextTypes.DEFAULT_TYPE, key: str):
         _mig_last_photo.pop(entry.get("src"), None)
     try:
         await _mig_publish(context, key, entry["items"],
-                           entry.get("series"), entry.get("src"))
+                           entry.get("series"), entry.get("src"),
+                           entry.get("chat_id"))
     except Exception as exc:
         logger.error("migration publish failed (%s): %s", key, exc, exc_info=True)
+        await _mig_notify(context, entry.get("chat_id"),
+                          f"❌ တင်လို့မရပါ: {str(exc)[:200]}", dedupe="err")
 
 
 async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
-                       series_key=None, src=None):
+                       series_key=None, src=None, chat_id=None):
     if not AUTO_PUBLISH_CHANNEL or not items:
         return
     try:
@@ -2070,7 +2119,8 @@ async def _mig_publish(context: ContextTypes.DEFAULT_TYPE, key: str, items,
                         len(items), key, _PAUSED_DROPS)
         return
     async with _MIG_PUBLISH_LOCK:
-        await _mig_publish_locked(context, key, items, series_key, src)
+        await _mig_publish_locked(context, key, items, series_key, src,
+                                  chat_id)
 
 
 async def _mig_post_album(context: ContextTypes.DEFAULT_TYPE, photos, videos,
@@ -2240,8 +2290,24 @@ def _mig_series_doc(src, series_key, title=None):
     return None
 
 
+async def _mig_repost_as_photo(context: ContextTypes.DEFAULT_TYPE, title,
+                               photo, caption, payload):
+    """Rebuild a post as ONE poster photo + the same deep-link buttons."""
+    try:
+        msg = await _with_flood(lambda: context.bot.send_photo(
+            chat_id=AUTO_PUBLISH_CHANNEL,
+            photo=photo["file_id"],
+            caption=caption,
+            reply_markup=_mig_keyboard(
+                create_deep_linked_url(context.bot.username, payload))))
+        return msg.message_id
+    except Exception as exc:
+        logger.error("photo repost failed (%s): %s", title, exc)
+        return None
+
+
 async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
-                                 src, series_key, sdoc, items):
+                                 src, series_key, sdoc, items, chat_id=None):
     """A new episode of an already-published series: add files to that post.
 
     No new channel post is created, so every episode shares ONE deep link.
@@ -2322,8 +2388,44 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
                   "synopsis": synopsis, "caption": caption}},
     )
 
+    # Old posts were published with a video as their media. When a poster is
+    # forwarded now, rebuild the SAME post as ONE photo + buttons and delete
+    # the old message only after the new one exists (never lose the post).
+    reposted = False
+    if (post_id and photos and payload
+            and (sdoc.get("media_kind") or "video") != "photo"):
+        new_id = await _mig_repost_as_photo(context, title, photos[0],
+                                            caption, payload)
+        if new_id:
+            old_id = int(post_id)
+            migrated_collection.update_one(
+                {"_id": sdoc["_id"]},
+                {"$set": {"post_id": new_id, "button_id": new_id,
+                          "media_kind": "photo",
+                          "poster_file_id": photos[0]["file_id"],
+                          "reposted_at": time.time()}})
+            sdoc["post_id"] = new_id
+            sdoc["button_id"] = new_id
+            post_id = button_id = new_id
+            try:
+                await context.bot.delete_message(AUTO_PUBLISH_CHANNEL, old_id)
+            except Exception as exc:
+                logger.warning("old post delete failed %s: %s", old_id, exc)
+            reposted = True
+            await _mig_notify(
+                context, chat_id,
+                f"✅ ပိုစတာပုံနဲ့ ပြန်တင်ပြီးပါပြီ — အဟောင်း #{old_id} ဖျက်ပြီး\n"
+                f"🔗 {_post_url(new_id)}", dedupe="repost")
+
     logger.info("series episode merged: %s (+%d files, %d items)",
                 title, len(added), len(items))
+    if not reposted:
+        await _mig_notify(
+            context, chat_id,
+            f"✅ လက်ခံပြီး series post ကို update လုပ်ပြီးပါပြီ\n"
+            f"🎬 {title}\n"
+            f"📦 ဖိုင် {len(get_file_info(payload) or [])} ခု\n"
+            f"🔗 {_post_url(post_id)}", dedupe="merge")
     migrated_collection.update_one(
         {"_id": key},
         {"$set": {
@@ -2338,14 +2440,32 @@ async def _mig_merge_into_series(context: ContextTypes.DEFAULT_TYPE, key: str,
 
 
 async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
-                              items, series_key=None, src=None):
+                              items, series_key=None, src=None, chat_id=None):
 
     if series_key:
         sdoc = _mig_series_doc(src, series_key, _mig_title(items))
         if sdoc and sdoc.get("done") and sdoc.get("payload"):
             await _mig_merge_into_series(context, key, src, series_key, sdoc,
-                                         items)
+                                         items, chat_id)
             return
+
+    # A batch with photos only has nothing to deliver behind a deep link. Such
+    # a post used to be published WITHOUT any button - the exact defect the
+    # admin kept finding. Never create one; ask for the video files instead.
+    if not [it for it in items if it["kind"] != "photo"]:
+        title0 = _mig_title(items) or "?"
+        logger.info("photo-only post skipped (no files to deliver): %s", key)
+        migrated_collection.update_one(
+            {"_id": key},
+            {"$set": {"done": True, "skipped": "photo_only", "title": title0}},
+            upsert=True,
+        )
+        await _mig_notify(
+            context, chat_id,
+            f"⚠️ ပုံတစ်ခုတည်းနဲ့ post မတင်ပါဘူး — button မပါတဲ့ post မဖြစ်အောင်။\n"
+            f"🎬 ဗီဒီယိုဖိုင်တွေပါ ထည့်ပို့ပါ။\n({title0})",
+            dedupe="photoonly")
+        return
 
     title = _mig_title(items) or "🎬 ဇာတ်ကားအသစ်"
     title = clean_migrate_caption(title)[:200].strip() or "🎬 ဇာတ်ကားအသစ်"
@@ -2385,12 +2505,22 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
             {"$set": {"done": True, "skipped": "no_media", "title": title}},
             upsert=True,
         )
+        await _mig_notify(context, chat_id,
+                          f"⚠️ တင်လို့မရပါ — media မပါဘူး ({title})",
+                          dedupe="nomed")
         return
 
     logger.info(
         "migration published '%s' (%d media) -> %s id=%s",
         title, len(items), AUTO_PUBLISH_CHANNEL, post_id,
     )
+    await _mig_notify(
+        context, chat_id,
+        f"✅ တင်ပြီးပါပြီ — {title}\n"
+        f"🖼️ ပုံ {len(photos)} / 🎬 ဖိုင် {len(videos)}\n"
+        f"🔗 {_post_url(post_id)}"
+        + ("" if videos else "\n⚠️ ဗီဒီယိုမပါလို့ button/deep link မပါဘူး"),
+        dedupe="pub")
     db_ok, db_post_id = await _mig_save_to_db(
         context, payload, title, photos, videos, seasons, eps)
     migrated_collection.update_one(
@@ -2401,6 +2531,8 @@ async def _mig_publish_locked(context: ContextTypes.DEFAULT_TYPE, key: str,
             "post_id": post_id,
             "button_id": button_id,
             "payload": payload,
+            "media_kind": "photo" if photos else "video",
+            "poster_file_id": (photos[0]["file_id"] if photos else None),
             "db_saved": bool(db_ok),
             "db_post_id": db_post_id,
             "published_at": time.time(),
@@ -2520,6 +2652,11 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
 
     doc = migrated_collection.find_one({"_id": key})
     if doc and doc.get("done") and key != series_doc_id:
+        await _mig_notify(
+            context, message.chat_id,
+            "⏭️ ဒီပုံ/ဖိုင်ကို အရင်က တင်ပြီးသားပါ"
+            + (f"\n🔗 {_post_url(doc.get('post_id'))}"
+               if doc.get("post_id") else ""), dedupe="skip")
         raise ApplicationHandlerStop
 
     now = time.monotonic()
@@ -2544,6 +2681,11 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
     entry["task"] = context.application.create_task(
         _mig_flush_later(context, key))
 
+    await _mig_notify(
+        context, message.chat_id,
+        f"📥 လက်ခံရရှိပါပြီ — {len(entry['items'])} ခု စုနေတယ်။ "
+        f"ခဏနေရင် post တင်ပါမယ်။", dedupe="buf")
+
     try:
         migrated_collection.update_one(
             {"_id": key},
@@ -2559,6 +2701,69 @@ async def handle_migrate_forward(update: Update, context: ContextTypes.DEFAULT_T
         logger.warning("migration record failed: %s", exc)
 
     raise ApplicationHandlerStop
+
+
+MANUAL_SRC = "manual"
+_CONV_KEYS = ("newpost_videos", "batch_files", "waiting_for_newfile",
+              "waiting_for_video_link")
+
+
+async def handle_manual_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin copies a photo/file straight to the bot (no forward header).
+
+    Forwarded messages are handled in group -1; this is the fallback for a
+    plain copy/paste of a source post. Skipped while /newpost or /batch is
+    running so those flows keep their own media.
+    """
+    msg = update.message
+    chat = update.effective_chat
+    if not msg or chat is None or chat.type != "private":
+        return
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    if any(k in context.user_data for k in _CONV_KEYS):
+        return
+    if msg.forward_origin or msg.forward_from_chat:
+        return
+    if not (msg.photo or msg.video or msg.document):
+        return
+    item = _mig_item(msg)
+    if item is None:
+        return
+
+    src = MANUAL_SRC
+    gid = getattr(msg, "media_group_id", None)
+    series_key = _mig_series_key(item)
+    if gid:
+        key = f"{src}:g{gid}"
+    elif series_key:
+        key = f"{src}:s:{series_key}"
+    else:
+        key = f"{src}:p{msg.message_id}"
+
+    now = time.monotonic()
+    entry = _mig_albums.get(key)
+    if entry is None:
+        entry = {
+            "items": [], "started": now, "last_update": now,
+            "chat_id": msg.chat_id, "src": src, "series": series_key,
+            "quiet": (MIG_QUIET_SERIES if series_key
+                      else MIG_QUIET_PERIOD if gid else MIG_QUIET_PHOTO),
+        }
+        _mig_albums[key] = entry
+    if series_key and not entry.get("series"):
+        entry["series"] = series_key
+    entry["items"].append(item)
+    entry["last_update"] = now
+    _cancel_mig_task(entry)
+    entry["task"] = context.application.create_task(
+        _mig_flush_later(context, key))
+    logger.info("manual photo buffered: %s (%d item(s))", key,
+                len(entry["items"]))
+    await _mig_notify(
+        context, msg.chat_id,
+        f"📥 လက်ခံရရှိပါပြီ — {len(entry['items'])} ခု စုနေတယ်။ "
+        f"ခဏနေရင် post တင်ပါမယ်။", dedupe="buf")
 
 
 async def migrate_posts_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4663,6 +4868,9 @@ def build_application(token):
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_migrate_forward), group=-1)
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+        & filters.ChatType.PRIVATE, handle_manual_photo), group=1)
     application.add_handler(CommandHandler("migrate_posts", migrate_posts_status))
     application.add_handler(CommandHandler("migrate_reset", migrate_reset_command))
     application.add_handler(CommandHandler("dbsave", dbsave_command))
