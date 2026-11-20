@@ -402,6 +402,7 @@ def status(db):
     cfg = db["worker_config"]
     progress = db["rebuild_progress"]
     return {
+        "ver": 4,
         "enabled": bool(cfg.find_one({"_id": "REBUILD_ENABLED", "value": True})),
         "has_session": bool(cfg.find_one({"_id": "USER_SESSION"})),
         "ok": progress.count_documents({"ok": True}),
