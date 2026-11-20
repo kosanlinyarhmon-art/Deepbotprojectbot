@@ -319,6 +319,13 @@ async def run_all(db):
         await client.disconnect()
 
 
+def settle_failed(db):
+    """Stop retrying records that already produced a channel post but were
+    marked failed by the old, broken verification check."""
+    return db["rebuild_progress"].update_many(
+        {"ok": False}, {"$set": {"settled": True}}).modified_count
+
+
 def status(db):
     cfg = db["worker_config"]
     progress = db["rebuild_progress"]
@@ -337,6 +344,10 @@ def status(db):
         "recent_failed": [{"title": r.get("title"), "why": r.get("why"),
                            "ts": r.get("ts")}
                           for r in progress.find({"ok": False}).sort("ts", -1).limit(10)],
+        "reasons": [{"why": r["_id"], "n": r["n"]} for r in progress.aggregate([
+            {"$match": {"ok": False}},
+            {"$group": {"_id": {"$substr": ["$why", 0, 90]}, "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}}, {"$limit": 10}])],
     }
 
 

@@ -709,7 +709,9 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
             if "enabled" in body:
                 cfg.update_one({"_id": "REBUILD_ENABLED"},
                                {"$set": {"value": bool(body["enabled"])}}, upsert=True)
-        from series_cloud_worker import status as worker_status
-        return jsonify({"ok": True, "status": worker_status(mongo_db)})
+        from series_cloud_worker import status as worker_status, settle_failed
+        settled = settle_failed(mongo_db) if body.get("settle_failed") else 0
+        return jsonify({"ok": True, "settled": settled,
+                        "status": worker_status(mongo_db)})
 
     return app
