@@ -79,9 +79,21 @@ def series_sig(title):
     return " ".join(words[:2])
 
 
+EPISODE_RE = re.compile(r"^\s*(?:ep(?:isode)?|part)\s*[\.\-_]?\s*\d+", re.I)
+
+
 def is_video_msg(m):
     return bool(m and (m.video or (
         m.document and str(getattr(m.document, "mime_type", "")).startswith("video"))))
+
+
+def is_episode_continuation(m):
+    """A later album where every episode is captioned 'Ep 2', 'Ep 3', ...
+
+    These belong to the same series as the anchored poster even though they
+    do not repeat its name, so they must not end the series window.
+    """
+    return bool(m and m.message and EPISODE_RE.match(m.message.strip()))
 
 
 def norm_text(text):
@@ -131,7 +143,8 @@ async def scan_source(client, item):
     by_id = {m.id: m for m in msgs}
 
     sig = series_sig(item.get("title"))
-    candidates = [m for m in msgs if fuzzy_match(m.message, sig)]
+    candidates = [m for m in msgs if fuzzy_match(m.message, sig)
+                  or is_episode_continuation(m)]
     groups = {m.grouped_id for m in candidates if m.grouped_id}
     posters = []
     for m in msgs:
@@ -151,7 +164,8 @@ async def scan_source(client, item):
     # Do not run into the next series when this one has no repeated captions.
     others = [m.id for m in msgs if m.id >= start and m.message
               and len(norm_text(m.message)) > 3
-              and not fuzzy_match(m.message, sig)]
+              and not fuzzy_match(m.message, sig)
+              and not is_episode_continuation(m)]
     if others:
         hi = min(hi, min(others) - 1)
     # The final labelled video's album includes its trailing poster; the next
@@ -447,7 +461,7 @@ def status(db):
     cfg = db["worker_config"]
     progress = db["rebuild_progress"]
     return {
-        "ver": 5,
+        "ver": 6,
         "progress": progress_summary(db),
         "enabled": bool(cfg.find_one({"_id": "REBUILD_ENABLED", "value": True})),
         "has_session": bool(cfg.find_one({"_id": "USER_SESSION"})),
