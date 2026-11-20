@@ -215,6 +215,17 @@ async def latest_channel(client):
     return (await retry(lambda: client.get_messages(CHANNEL, limit=1)))[0]
 
 
+async def wait_new_post(client, before, timeout=180):
+    """The bot can be minutes behind on a busy day — watch the channel."""
+    start = time.time()
+    while time.time() - start < timeout:
+        latest = await latest_channel(client)
+        if latest.id > before:
+            return latest
+        await asyncio.sleep(5)
+    return None
+
+
 async def rebuild(client, bot, item):
     poster, videos, source_syn, source_title = await scan_source(client, item)
     if not poster or not videos:
@@ -226,9 +237,6 @@ async def rebuild(client, bot, item):
         synopsis = ""
     caption = exact_title + ("\n" + synopsis if synopsis else "")
     before = (await latest_channel(client)).id
-    # Only inspect bot replies created during THIS run; a shared DM otherwise
-    # mixes confirmations from the previous series into the verification.
-    mark = (await retry(lambda: client.get_messages(bot, limit=1)))[0].id
 
     await retry(lambda: client.send_message(bot, "/cancel"))
     await asyncio.sleep(1.5)
@@ -246,18 +254,11 @@ async def rebuild(client, bot, item):
             bot, [v], from_peer=int(str(item["source"]).strip())))
         await asyncio.sleep(1.2)
     await retry(lambda: client.send_message(bot, "a"))
-    await asyncio.sleep(9)
-
-    replies = await retry(lambda: client.get_messages(bot, min_id=mark))
-    text = " ".join((m.message or "") for m in replies if not m.out)
-    # The bot's final reply no longer contains "Movie N ဖိုင်"; its reliable
-    # per-file acknowledgement is "(စုစုပေါင်း N ဖိုင်)".
-    if f"စုစုပေါင်း {len(videos)} ဖိုင်" not in text:
-        return False, f"bot confirmed a different file count than {len(videos)}"
-
-    after = await latest_channel(client)
-    if after.id <= before:
-        return False, "no new channel post"
+    # Bot DM replies can be minutes late, so verify the published post itself
+    # instead of trusting acknowledgement text in the shared DM.
+    after = await wait_new_post(client, before)
+    if not after:
+        return False, "no new channel post within 180s"
     shown = await retry(lambda: client.get_messages(CHANNEL, ids=[after.id]))
     msg = shown[0]
     if not msg:
@@ -391,9 +392,9 @@ def settle_failed(db):
 
 
 def settle_false_confirm(db):
-    """Only the records hit by the outdated 'Movie N ဖိုင်' check."""
+    """Only the records hit by the outdated DM-based verification checks."""
     return db["rebuild_progress"].update_many(
-        {"ok": False, "why": {"$regex": "bot did not confirm"}},
+        {"ok": False, "why": {"$regex": "bot did not confirm|bot confirmed a different"}},
         {"$set": {"settled": True}}).modified_count
 
 
