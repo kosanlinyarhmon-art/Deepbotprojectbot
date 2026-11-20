@@ -45,6 +45,12 @@ def _status():
 
 
 LAST_POST_ERROR = {}
+POST_TRACE = []
+
+
+def _trace(msg):
+    POST_TRACE.append({"t": int(time.time()), "msg": str(msg)[:200]})
+    del POST_TRACE[:-40]
 
 
 @app.route("/admin/debug")
@@ -54,7 +60,8 @@ def _admin_debug():
         return jsonify({"ok": False}), 403
     return jsonify({"ok": True, "movie_channels": MOVIE_CHANNEL_IDS,
                     "db_channel": DATABASE_CHANNEL_ID,
-                    "last_error": LAST_POST_ERROR})
+                    "last_error": LAST_POST_ERROR,
+                    "trace": POST_TRACE})
 
 # ---------- MongoDB Connection ----------
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -1152,6 +1159,7 @@ async def receive_video_after_caption(update: Update, context: ContextTypes.DEFA
 
 
 async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _trace("finalize: enter")
     videos = context.user_data.get('newpost_videos', [])
     links = context.user_data.get('newpost_links', [])
     if not videos and not links:
@@ -1222,7 +1230,9 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(photo_caption) > 1024:
             photo_caption = photo_caption[:1020].rstrip() + "..."
 
+        _trace("finalize: about to reply_photo")
         await update.message.reply_photo(photo=poster, caption=photo_caption, reply_markup=reply_markup)
+        _trace("finalize: reply_photo done")
         await update.message.reply_text(
             f"သင်၏ ဇာတ်ကားရယူရန် လင့်\n\n"
             f"{deep_link}\n\n"
@@ -1233,7 +1243,9 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Auto-post to the movie channels: poster photo + caption + buttons.
         movie_posted = 0
         movie_failed = []
+        _trace(f"finalize: reply_text done, channels={MOVIE_CHANNEL_IDS}")
         for chat_id in MOVIE_CHANNEL_IDS:
+            _trace(f"finalize: send_photo start {chat_id}")
             try:
                 await context.bot.send_photo(
                     chat_id=chat_id,
@@ -1242,9 +1254,11 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=reply_markup,
                 )
                 movie_posted += 1
+                _trace(f"finalize: send_photo OK {chat_id}")
             except Exception as e:
                 movie_failed.append(chat_id)
                 LAST_POST_ERROR.update({"chat": chat_id, "error": str(e)[:500]})
+                _trace(f"finalize: send_photo ERR {chat_id}: {e}")
                 logger.error(f"Auto movie-channel post failed to {chat_id}: {e}")
 
         # Auto-post to the database channel, in order: poster photo → synopsis → movie files.
@@ -1349,6 +1363,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_fail.append(v['file_name'])
                     logger.error(f"Auto database-channel post failed for {v['file_name']}: {e}")
 
+        _trace(f"finalize: about to summary, movie_posted={movie_posted}")
         summary = f"✅ **Post ဖန်တီးပြီးပါပြီ။**\n\n"
         summary += f"🎬 Movie channel {movie_posted}/{len(MOVIE_CHANNEL_IDS)} ခုမှာ တင်ပြီးပါပြီ။\n"
         if DATABASE_CHANNEL_ID:
@@ -1358,9 +1373,11 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if db_fail:
             summary += f"⚠️ DB တင်၍မရတဲ့အရာများ: {', '.join(db_fail)}\n"
         await update.message.reply_text(summary)
+        _trace("finalize: summary sent, END")
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
+        _trace(f"finalize: EXCEPTION {e}")
         await update.message.reply_text(f"❌ Post ဖန်တီးရာတွင် အမှား: {str(e)}")
         return ConversationHandler.END
 
