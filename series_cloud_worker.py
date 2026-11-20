@@ -162,6 +162,9 @@ async def rebuild(client, bot, item):
         synopsis = ""
     caption = exact_title + ("\n" + synopsis if synopsis else "")
     before = (await latest_channel(client)).id
+    # Only inspect bot replies created during THIS run; a shared DM otherwise
+    # mixes confirmations from the previous series into the verification.
+    mark = (await retry(lambda: client.get_messages(bot, limit=1)))[0].id
 
     await retry(lambda: client.send_message(bot, "/cancel"))
     await asyncio.sleep(1.5)
@@ -181,10 +184,12 @@ async def rebuild(client, bot, item):
     await retry(lambda: client.send_message(bot, "a"))
     await asyncio.sleep(9)
 
-    replies = await retry(lambda: client.get_messages(bot, limit=60))
+    replies = await retry(lambda: client.get_messages(bot, min_id=mark))
     text = " ".join((m.message or "") for m in replies if not m.out)
-    if f"Movie {len(videos)} ဖိုင်" not in text:
-        return False, "bot did not confirm all files"
+    # The bot's final reply no longer contains "Movie N ဖိုင်"; its reliable
+    # per-file acknowledgement is "(စုစုပေါင်း N ဖိုင်)".
+    if f"စုစုပေါင်း {len(videos)} ဖိုင်" not in text:
+        return False, f"bot confirmed a different file count than {len(videos)}"
 
     after = await latest_channel(client)
     if after.id <= before:
@@ -264,14 +269,19 @@ async def run_all(db):
     LOG.info("series worker connected as %s", me.id)
     bot = await retry(lambda: client.get_entity(BOT))
     progress = db["rebuild_progress"]
-    done = {r["_id"] for r in progress.find({"ok": True}, {"_id": 1})}
     query = {"series_key": {"$exists": True},
              "merged_into": {"$exists": False},
              "payload": {"$exists": True}}
     try:
         while cfg.find_one({"_id": "REBUILD_ENABLED", "value": True}):
+            prog = {str(r["_id"]): r for r in progress.find({})}
+            done = {k for k, r in prog.items() if r.get("ok") or r.get("settled")}
             docs = list(db["migrated_posts"].find(query).sort("post_id", -1).limit(600))
-            todo = [d for d in docs if str(d["_id"]) not in done]
+            # A genuine failure is tried at most twice; it must never spin
+            # forever and keep publishing duplicate posts.
+            todo = [d for d in docs
+                    if str(d["_id"]) not in done
+                    and int(prog.get(str(d["_id"]), {}).get("tries") or 0) < 2]
             if not todo:
                 LOG.info("series worker: everything done, idling")
                 await asyncio.sleep(60)
@@ -281,26 +291,29 @@ async def run_all(db):
                 if not cfg.find_one({"_id": "REBUILD_ENABLED", "value": True}):
                     break
                 item = _make_item(db, d)
+                key = item["id"]
+                tries = int(prog.get(key, {}).get("tries") or 0) + 1
                 try:
                     ok, result = await rebuild(client, bot, item)
                     rec = {"ok": ok, "ts": int(time.time()),
-                           "title": item["title"]}
+                           "title": item["title"], "tries": tries}
                     rec.update(result if ok else {"why": str(result)[:250]})
-                    progress.update_one({"_id": item["id"]},
-                                        {"$set": rec}, upsert=True)
+                    if not ok and tries >= 2:
+                        rec["settled"] = True
+                    progress.update_one({"_id": key}, {"$set": rec}, upsert=True)
                     if ok:
-                        done.add(item["id"])
                         LOG.info("OK %s %s -> %s (%s files)", item["title"],
                                  result["old"], result["new"], result["files"])
                     else:
                         LOG.warning("FAIL %s: %s", item["title"], result)
                 except Exception as exc:
                     LOG.exception("series worker item failed: %s", item["title"])
-                    progress.update_one(
-                        {"_id": item["id"]},
-                        {"$set": {"ok": False, "ts": int(time.time()),
-                                  "title": item["title"], "why": str(exc)[:250]}},
-                        upsert=True)
+                    rec = {"ok": False, "ts": int(time.time()),
+                           "title": item["title"], "why": str(exc)[:250],
+                           "tries": tries}
+                    if tries >= 2:
+                        rec["settled"] = True
+                    progress.update_one({"_id": key}, {"$set": rec}, upsert=True)
                 await asyncio.sleep(3)
     finally:
         await client.disconnect()
