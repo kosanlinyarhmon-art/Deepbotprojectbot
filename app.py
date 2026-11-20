@@ -43,6 +43,19 @@ def _status():
     return jsonify({"ok": True, "pid": os.getpid(),
                     "uptime_sec": int(time.time() - _BOOT_TS)})
 
+
+LAST_POST_ERROR = {}
+
+
+@app.route("/admin/debug")
+def _admin_debug():
+    from flask import jsonify, request
+    if request.args.get("key") != ADMIN_KEY:
+        return jsonify({"ok": False}), 403
+    return jsonify({"ok": True, "movie_channels": MOVIE_CHANNEL_IDS,
+                    "db_channel": DATABASE_CHANNEL_ID,
+                    "last_error": LAST_POST_ERROR})
+
 # ---------- MongoDB Connection ----------
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
@@ -1231,6 +1244,7 @@ async def finalize_newpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_posted += 1
             except Exception as e:
                 movie_failed.append(chat_id)
+                LAST_POST_ERROR.update({"chat": chat_id, "error": str(e)[:500]})
                 logger.error(f"Auto movie-channel post failed to {chat_id}: {e}")
 
         # Auto-post to the database channel, in order: poster photo → synopsis → movie files.
