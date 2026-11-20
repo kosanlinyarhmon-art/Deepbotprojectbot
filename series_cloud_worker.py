@@ -143,8 +143,12 @@ async def scan_source(client, item):
     by_id = {m.id: m for m in msgs}
 
     sig = series_sig(item.get("title"))
-    candidates = [m for m in msgs if fuzzy_match(m.message, sig)
-                  or is_episode_continuation(m)]
+    candidates = [m for m in msgs if fuzzy_match(m.message, sig)]
+    # Numbered albums after the anchor belong to this series, but they must
+    # never be treated as posters (their photos are episode thumbnails).
+    continuation = [m for m in msgs
+                    if m.id >= start and is_episode_continuation(m)
+                    and not fuzzy_match(m.message, sig)]
     groups = {m.grouped_id for m in candidates if m.grouped_id}
     posters = []
     for m in msgs:
@@ -170,19 +174,21 @@ async def scan_source(client, item):
         hi = min(hi, min(others) - 1)
     # The final labelled video's album includes its trailing poster; the next
     # album belongs to another series even when its captions are empty.
-    if candidates:
-        last = max(candidates, key=lambda m: m.id)
+    labelled = candidates + continuation
+    if labelled:
+        last = max(labelled, key=lambda m: m.id)
         if last.grouped_id:
             tail = [m.id for m in msgs if m.grouped_id == last.grouped_id]
             if tail:
                 hi = min(hi, max(tail))
 
     videos = set()
-    for m in candidates:
+    for m in labelled:
         if is_video_msg(m) and m.id <= hi:
             videos.add(m.id)
+    video_groups = groups | {m.grouped_id for m in continuation if m.grouped_id}
     for m in msgs:
-        if m.grouped_id and m.grouped_id in groups and is_video_msg(m) and m.id <= hi:
+        if m.grouped_id and m.grouped_id in video_groups and is_video_msg(m) and m.id <= hi:
             videos.add(m.id)
     for p in posters:
         seen_gap = 0
@@ -461,7 +467,7 @@ def status(db):
     cfg = db["worker_config"]
     progress = db["rebuild_progress"]
     return {
-        "ver": 6,
+        "ver": 7,
         "progress": progress_summary(db),
         "enabled": bool(cfg.find_one({"_id": "REBUILD_ENABLED", "value": True})),
         "has_session": bool(cfg.find_one({"_id": "USER_SESSION"})),
