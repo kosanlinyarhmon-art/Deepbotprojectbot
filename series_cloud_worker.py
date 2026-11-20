@@ -84,66 +84,130 @@ def is_video_msg(m):
         m.document and str(getattr(m.document, "mime_type", "")).startswith("video"))))
 
 
+def norm_text(text):
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def fuzzy_match(text, sig):
+    """Source captions are often misspelt: Disenchanment / disenchantment."""
+    norm = norm_text(text)
+    if not sig or not norm:
+        return False
+    if sig in norm:
+        return True
+    return len(sig) >= 5 and sig.split()[0][:5] in norm
+
+
+async def locate_anchor(client, ent, item):
+    """Older docs have no src_msg_id — find the source post by its title."""
+    sig = series_sig(item.get("title"))
+    word = sig.split()[0] if sig else ""
+    if not word:
+        return None
+    found = await retry(lambda: client.get_messages(ent, search=word, limit=100))
+    cands = [m for m in found if m and fuzzy_match(m.message, sig)] or \
+            [m for m in found if m]
+    if not cands:
+        return None
+    cands.sort(key=lambda m: (0 if m.photo else 1, m.id))
+    return cands[0].id
+
+
 async def scan_source(client, item):
     src = int(str(item["source"]).strip())
-    start = int(str(item["src_msg_id"]).strip())
+    raw_start = item.get("src_msg_id")
+    start = (int(str(raw_start).strip())
+             if raw_start not in (None, "", "None") else None)
     ent = await retry(lambda: client.get_entity(src))
+    if start is None:
+        start = await locate_anchor(client, ent, item)
+        if start is None:
+            return None, [], "", ""
     newest = (await retry(lambda: client.get_messages(ent, limit=1)))[0].id
-    lo, hi = max(1, start - 70), min(newest, start + 90)
+    lo, hi = max(1, start - 25), min(newest, start + 120)
     msgs = await retry(lambda: client.get_messages(
         ent, ids=list(range(lo, hi + 1))))
     msgs = [m for m in msgs if m]
     by_id = {m.id: m for m in msgs}
 
     sig = series_sig(item.get("title"))
+    candidates = [m for m in msgs if fuzzy_match(m.message, sig)]
+    groups = {m.grouped_id for m in candidates if m.grouped_id}
     posters = []
     for m in msgs:
         if not m.photo:
             continue
-        norm = " ".join(re.findall(r"[a-z0-9]+", (m.message or "").lower()))
-        if sig and sig in norm:
+        if fuzzy_match(m.message, sig) or (m.grouped_id and m.grouped_id in groups):
             posters.append(m)
-    near = [m for m in msgs if m.photo and m.id <= start and start - m.id <= 14]
-    if near:
-        best = max(near, key=lambda m: m.id)
-        if best not in posters:
-            posters.append(best)
+    if not posters:
+        near = [m for m in msgs if m.photo and m.id <= start
+                and start - m.id <= 14]
+        if near:
+            posters.append(max(near, key=lambda m: m.id))
     posters.sort(key=lambda m: m.id)
     if not posters:
         return None, [], "", ""
 
-    videos = []
+    # Do not run into the next series when this one has no repeated captions.
+    others = [m.id for m in msgs if m.id >= start and m.message
+              and len(norm_text(m.message)) > 3
+              and not fuzzy_match(m.message, sig)]
+    if others:
+        hi = min(hi, min(others) - 1)
+    # The final labelled video's album includes its trailing poster; the next
+    # album belongs to another series even when its captions are empty.
+    if candidates:
+        last = max(candidates, key=lambda m: m.id)
+        if last.grouped_id:
+            tail = [m.id for m in msgs if m.grouped_id == last.grouped_id]
+            if tail:
+                hi = min(hi, max(tail))
+
+    videos = set()
+    for m in candidates:
+        if is_video_msg(m) and m.id <= hi:
+            videos.add(m.id)
+    for m in msgs:
+        if m.grouped_id and m.grouped_id in groups and is_video_msg(m) and m.id <= hi:
+            videos.add(m.id)
     for p in posters:
         seen_gap = 0
         for mid in range(p.id + 1, min(hi, p.id + 40) + 1):
             m = by_id.get(mid)
-            if m and m.photo:
+            if not m:
+                seen_gap += 1
+                if seen_gap >= 3:
+                    break
+                continue
+            if m.photo and fuzzy_match(m.message, sig):
                 break
             if is_video_msg(m):
-                videos.append(mid)
+                videos.add(mid)
                 seen_gap = 0
                 if len(videos) >= 60:
                     break
                 continue
-            if videos and mid > videos[-1]:
-                seen_gap += 1
-                if seen_gap >= 3:
-                    break
-    videos = sorted(set(videos))
+            seen_gap += 1
+            if seen_gap >= 3:
+                break
+    videos = sorted(videos)
     if not videos:
         return None, [], "", ""
     poster = max((p for p in posters if p.id <= start),
                  key=lambda m: m.id, default=posters[0])
 
     syn_source, src_title = "", ""
-    nearby = [m for m in msgs if m.id > poster.id and m.id <= videos[0]
+    nearby = [m for m in msgs if m.id >= poster.id and m.id <= videos[0]
               and m.message]
     for m in nearby:
         title, body = split_source(m.message)
         if len(body) > len(syn_source):
             syn_source, src_title = body, title
-    if not src_title and len(posters) == 1:
-        src_title, _ = split_source(posters[0].message or "")
+    if not src_title:
+        labeled = sorted((m for m in candidates if m.message),
+                         key=lambda m: m.id)
+        if labeled:
+            src_title, _ = split_source(labeled[0].message)
     return poster.id, videos, syn_source, src_title
 
 
@@ -324,6 +388,13 @@ def settle_failed(db):
     marked failed by the old, broken verification check."""
     return db["rebuild_progress"].update_many(
         {"ok": False}, {"$set": {"settled": True}}).modified_count
+
+
+def settle_false_confirm(db):
+    """Only the records hit by the outdated 'Movie N ဖိုင်' check."""
+    return db["rebuild_progress"].update_many(
+        {"ok": False, "why": {"$regex": "bot did not confirm"}},
+        {"$set": {"settled": True}}).modified_count
 
 
 def status(db):
