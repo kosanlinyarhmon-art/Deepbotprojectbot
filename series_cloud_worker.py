@@ -215,14 +215,23 @@ async def latest_channel(client):
     return (await retry(lambda: client.get_messages(CHANNEL, limit=1)))[0]
 
 
-async def wait_new_post(client, before, timeout=180):
-    """The bot can be minutes behind on a busy day — watch the channel."""
+async def wait_new_post(client, before, timeout=600):
+    """Watch for the published post using a server-side id filter.
+
+    get_messages(limit=1) can return a stale cached "latest" message when the
+    user session's channel difference is out of date, which made real posts
+    look like failures.  min_id is resolved by Telegram, so it never depends
+    on that local state.  The bot also occasionally stalls for minutes, hence
+    the longer timeout.
+    """
     start = time.time()
     while time.time() - start < timeout:
-        latest = await latest_channel(client)
-        if latest.id > before:
-            return latest
-        await asyncio.sleep(5)
+        found = await retry(lambda: client.get_messages(
+            CHANNEL, min_id=before, limit=10))
+        new = [m for m in found if m and m.id > before and m.photo]
+        if new:
+            return max(new, key=lambda m: m.id)
+        await asyncio.sleep(10)
     return None
 
 
@@ -258,7 +267,7 @@ async def rebuild(client, bot, item):
     # instead of trusting acknowledgement text in the shared DM.
     after = await wait_new_post(client, before)
     if not after:
-        return False, "no new channel post within 180s"
+        return False, "no new channel post within 600s"
     shown = await retry(lambda: client.get_messages(CHANNEL, ids=[after.id]))
     msg = shown[0]
     if not msg:
@@ -398,11 +407,48 @@ def settle_false_confirm(db):
         {"$set": {"settled": True}}).modified_count
 
 
+def settle_pattern(db, pattern):
+    """Mark failed records matching a regex as settled (no more retries)."""
+    return db["rebuild_progress"].update_many(
+        {"ok": False, "why": {"$regex": pattern}},
+        {"$set": {"settled": True}}).modified_count
+
+
+def retry_pattern(db, pattern):
+    """Give failed records matching a regex another chance.
+
+    Used after a scanner/verification fix: clear 'settled' and reset 'tries'
+    so the worker actually reprocesses them instead of idling.
+    """
+    progress = db["rebuild_progress"]
+    ids = [r["_id"] for r in progress.find(
+        {"why": {"$regex": pattern}}, {"_id": 1})]
+    if ids:
+        progress.update_many(
+            {"_id": {"$in": ids}},
+            {"$unset": {"settled": "", "why": ""},
+             "$set": {"ok": False, "tries": 0}})
+    return len(ids)
+
+
+def progress_summary(db):
+    progress = db["rebuild_progress"]
+    return {
+        "done": progress.count_documents({"ok": True}),
+        "failed": progress.count_documents({"ok": False}),
+        "settled": progress.count_documents({"settled": True}),
+        "retryable": progress.count_documents(
+            {"ok": False, "settled": {"$exists": False},
+             "tries": {"$lt": 2}}),
+    }
+
+
 def status(db):
     cfg = db["worker_config"]
     progress = db["rebuild_progress"]
     return {
-        "ver": 4,
+        "ver": 5,
+        "progress": progress_summary(db),
         "enabled": bool(cfg.find_one({"_id": "REBUILD_ENABLED", "value": True})),
         "has_session": bool(cfg.find_one({"_id": "USER_SESSION"})),
         "ok": progress.count_documents({"ok": True}),

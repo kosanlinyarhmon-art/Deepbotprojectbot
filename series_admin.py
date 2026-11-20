@@ -710,12 +710,19 @@ def register(app, *, tokens, mongo_db, channel_id, db_channel_id,
                 cfg.update_one({"_id": "REBUILD_ENABLED"},
                                {"$set": {"value": bool(body["enabled"])}}, upsert=True)
         from series_cloud_worker import (status as worker_status, settle_failed,
-                                         settle_false_confirm)
+                                         settle_false_confirm, settle_pattern,
+                                         retry_pattern)
         settled = settle_failed(mongo_db) if body.get("settle_failed") else 0
         confirmed = (settle_false_confirm(mongo_db)
                      if body.get("settle_false_confirm") else 0)
+        by_pattern = (settle_pattern(mongo_db, str(body["settle_pattern"]))
+                      if body.get("settle_pattern") else 0)
+        retried = (retry_pattern(mongo_db, str(body["retry_pattern"]))
+                   if body.get("retry_pattern") else 0)
         return jsonify({"ok": True, "settled": settled,
                         "settled_false_confirm": confirmed,
+                        "settled_by_pattern": by_pattern,
+                        "retried": retried,
                         "status": worker_status(mongo_db)})
 
     return app
